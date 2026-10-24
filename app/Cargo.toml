@@ -1,0 +1,30 @@
+[package]
+name = "bridge-app"
+version.workspace = true
+edition.workspace = true
+description = "Мост — окно приложения (Tauri 2) и значок у часов; узел работает в том же процессе"
+
+[[bin]]
+name = "bridge-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+bridge-node = { path = "../node" }
+bridge-core = { path = "../core" }
+tokio.workspace = true
+parking_lot.workspace = true
+serde_json.workspace = true
+axum.workspace = true
+tower = { version = "0.5", default-features = false, features = ["util"] }
+tauri = { version = "2", features = ["image-png"] }
+windows-sys = { version = "0.59", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_System_Threading", "Win32_Security", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse"] }
+
+[features]
+default = ["custom-protocol"]
+# окно берёт страницу не с dev-сервера, а из моста (обычная сборка)
+custom-protocol = ["tauri/custom-protocol"]
+# проверить код Windows на любой ОС: cargo check -p bridge-app --features check-win
+check-win = ["bridge-node/check-win"]

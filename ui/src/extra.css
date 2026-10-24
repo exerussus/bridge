@@ -1,0 +1,232 @@
+/* ── 3.0: дополнения к стилям панели ── */
+
+/* текст сообщения — в своём узле (анимация слов не трогает разметку Svelte) */
+.msg .tx:empty{display:none}
+
+/* доска: слои */
+.bdlayers{position:absolute;top:0;right:0;bottom:0;width:320px;max-width:90%;background:var(--solid);border-left:1px solid var(--line2);box-shadow:-18px 0 40px rgba(0,0,0,.35);padding:14px;box-sizing:border-box;display:flex;flex-direction:column;gap:10px;overflow:auto;z-index:5}
+.bd.full .bdlayers{top:52px}
+.bdlayers .lylist{display:flex;flex-direction:column;gap:4px}
+.bdlayers>*,.bdlayers .lylist>*{flex-shrink:0}
+.lyrow{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:9px;border:1px solid transparent;cursor:pointer;font-size:13px}
+.lyrow:hover{background:rgba(160,170,255,.06)}
+.lyrow.on{border-color:rgba(56,225,240,.45);background:rgba(56,225,240,.08)}
+.lyrow .lyname{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+.lyrow .tool{width:28px;height:28px}
+.lyrow .tool .gi{width:16px;height:16px}
+.bd .bdlay{white-space:nowrap;max-width:180px;overflow:hidden;text-overflow:ellipsis;color:var(--muted)}
+
+/* доска: фон */
+.bdcfg .bdbg{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.bdcfg .bdbg .sw{width:26px;height:26px;border-radius:8px;border:1px solid rgba(160,170,255,.35);cursor:pointer;padding:0}
+.bdcfg .bdbg .sw.on{box-shadow:0 0 0 2px var(--solid),0 0 0 4px var(--cyan)}
+.bdcfg .bgpick{position:relative;overflow:hidden;display:inline-block;background-image:conic-gradient(red,yellow,lime,cyan,blue,magenta,red)!important}
+.bdcfg .bgpick input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
+.bdcfg .ptog em{font-style:normal;font-size:11.5px;color:var(--muted);min-width:38px;text-align:right}
+
+/* показ: управление — полоса сверху и окно запроса */
+.ctlbar .gi{width:18px;height:18px}
+
+/* доска: панель текста (шрифт, размер, стиль) — под панелью цветов */
+.bdtxt{top:62px;left:66px;padding:5px 8px;display:flex;align-items:center;gap:4px;flex-wrap:nowrap}
+.bd.full .bdtxt{top:116px}
+.bdtxt .ff{min-width:0;padding:0 10px;font-size:14px;font-weight:600}
+.bdtxt .ff[data-ff="hand"]{font-size:18px}
+.bdtxt .ff.on{border-color:var(--cyan);color:var(--cyan);background:rgba(56,225,240,.1)}
+.bdtxt .tool.on{background:rgba(56,225,240,.16);color:var(--cyan)}
+.bdtxt .txtfs{width:58px;text-align:center;height:30px;padding:0 4px}
+@container (max-width:980px){.bdtxt{top:auto;bottom:112px;left:12px}}
+@container (max-width:640px){.bdtxt .ff{padding:0 6px;font-size:12px}}
+
+/* показ во весь экран: карточка целиком — заголовок, инструменты и видео */
+.stream:fullscreen{background:#05060F;padding:10px 14px 12px;gap:6px;border-radius:0;clip-path:none;border:0;display:flex;flex-direction:column}
+.stream:fullscreen .stools{margin:0}
+.stream:fullscreen .sv{flex:1;min-height:0;border-radius:4px}
+.stream:fullscreen .sv video{max-height:none;height:100%;width:100%}
+.stream:fullscreen .vstat{display:none}
+.stream:fullscreen .pop{z-index:50}
+
+/* плитка участника: свой фон, маска, цвета, форма аватарки */
+.tile .tart{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:0}
+.tile .tart img,.tile .tart .trep{position:absolute;inset:0;width:100%;height:100%}
+.tile .tart .ttint{position:absolute;inset:0;mix-blend-mode:color}
+.tile.tcust>:not(.tart){z-index:1}
+.tile.tcust>:not(.tart):not(.stl){position:relative}
+.tile.tbord{border-color:var(--tb)}
+.tile.tname>b{color:var(--tn)}
+.tile.tcust .av{width:calc(64px * var(--avk,1));height:calc(64px * var(--avk,1));font-size:calc(26px * var(--avk,1))}
+.tile.tring .av{box-shadow:inset 0 0 0 2px var(--ring),0 0 0 2px var(--ring)}
+.tile.tglow.speaking .av{box-shadow:inset 0 0 0 1.5px var(--spk),0 0 0 4px color-mix(in srgb,var(--spk) 22%,transparent),0 0 26px color-mix(in srgb,var(--spk) 70%,transparent)}
+.tile.tglow.speaking{border-color:color-mix(in srgb,var(--spk) 60%,transparent)}
+.tile.sh-round .av{border-radius:24%}
+.tile.sh-square .av{border-radius:6px}
+.tile.sh-hex .av{border-radius:0;clip-path:polygon(25% 3%,75% 3%,100% 50%,75% 97%,25% 97%,0 50%)}
+.tile.sh-none .av{visibility:hidden;height:8px}
+/* «Настройки» → «Плитка» */
+.tiled{display:grid;grid-template-columns:minmax(240px,300px) 1fr;gap:16px;align-items:start}
+.tiled .tprev{position:sticky;top:0;display:flex;flex-direction:column;gap:10px}
+.tiled .call.one{grid-template-columns:1fr}
+.tiled .tile.grab{cursor:grab;touch-action:none}
+.tiled .tile .tact .b{pointer-events:none}
+.tiled .tctl{display:flex;flex-direction:column;gap:12px;min-width:0}
+.tiled .seg{flex-wrap:wrap}
+.tiled .tval{font-style:normal;font-size:12px;color:var(--muted);min-width:46px;text-align:right}
+.tiled input[type=color]{width:38px;height:28px;padding:0;border:1px solid var(--line2);border-radius:8px;background:none;cursor:pointer}
+@container (max-width:760px){.tiled{grid-template-columns:1fr}.tiled .tprev{position:static}}
+@media (max-width:900px){.tiled{grid-template-columns:1fr}.tiled .tprev{position:static}}
+.bdtxt{max-width:calc(100% - 300px);flex-wrap:wrap}
+@container (max-width:980px){.bdtxt{max-width:calc(100% - 24px)}}
+
+/* 3.2: плитка — красный только для выключенного микрофона и звука; говорит — зелёный; показывает — синий */
+.tile.speaking .av{box-shadow:inset 0 0 0 1.5px #5DE08E,0 0 0 4px rgba(93,224,142,.16),0 0 24px rgba(93,224,142,.6)}
+.ind.live{color:#6FA8FF;border-color:rgba(79,139,255,.6);box-shadow:0 0 10px rgba(79,139,255,.22)}
+.tile.sharing{border-color:rgba(79,139,255,.85);box-shadow:inset 0 0 0 1.5px rgba(79,139,255,.75),inset 0 0 26px rgba(79,139,255,.22)}
+.tile.sharing.tbord{border-color:rgba(79,139,255,.85)}
+.tile .tshare{position:absolute;top:9px;right:18px;z-index:2;display:flex;align-items:center;gap:3px;padding:4px 7px;border-radius:999px;border:1px solid rgba(79,139,255,.7);background:rgba(20,34,70,.85);color:#9CC2FF;cursor:pointer;font:600 11px/1 var(--font)}
+.tile .tshare:hover{background:rgba(79,139,255,.3);color:#fff}
+.tile .tshare .gi{width:15px;height:15px}
+/* звучит приветствие (звук входа) — плитка мигает */
+.tile.greeting{animation:greet .55s ease-in-out infinite alternate}
+@keyframes greet{from{box-shadow:inset 0 0 0 0 rgba(255,181,71,0)}to{box-shadow:inset 0 0 0 2px rgba(255,181,71,.85),inset 0 0 34px rgba(255,181,71,.35)}}
+.tile.greeting .av{animation:greetav .55s ease-in-out infinite alternate}
+@keyframes greetav{from{transform:scale(1)}to{transform:scale(1.07)}}
+/* файл тащат на плитку — отправить ему */
+.tile.dropon,.tile.dropno{outline:2px dashed var(--cyan);outline-offset:-6px}
+.tile.dropno{outline-color:var(--amber)}
+.tile.dropon::after,.tile.dropno::after{content:attr(data-drop);position:absolute;inset:0;z-index:3;display:flex;align-items:center;justify-content:center;padding:12px;text-align:center;font:600 14px var(--font);color:#fff;background:rgba(10,40,60,.78);pointer-events:none}
+.tile.dropno::after{background:rgba(60,40,10,.78)}
+.tile.dropon *{pointer-events:none}
+
+/* 3.2: чат — перенос длинных слов и ссылок, ответы, цитаты, «копировать» */
+.msg{overflow-wrap:anywhere;word-break:break-word;position:relative}
+.msg .tx a{overflow-wrap:anywhere;word-break:break-all}
+.msg.anim .w{white-space:pre-wrap;max-width:100%;overflow-wrap:anywhere}
+.msg .tx .q{display:block;border-left:3px solid rgba(var(--tone-rgb),.6);padding:1px 0 1px 9px;margin:2px 0;color:var(--muted);font-style:italic}
+.msg .rq{display:flex;flex-direction:column;gap:2px;width:100%;text-align:left;margin:0 0 6px;padding:5px 9px;border:0;border-left:3px solid var(--cyan);border-radius:6px;background:rgba(56,225,240,.08);color:var(--text);cursor:pointer;font:inherit;white-space:normal}
+.msg .rq b{font-size:11.5px;color:var(--cyan)}
+.msg .rq span{font-size:12.5px;color:var(--muted);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.msg .rq.quote span{font-style:italic}
+.msg .rq.quote{border-left-color:var(--amber);background:rgba(255,181,71,.08)}
+.msg .rq.quote b{color:var(--amber)}
+.msg .rq:hover{background:rgba(56,225,240,.16)}
+.msg .mact{position:absolute;top:-12px;display:flex;gap:2px;padding:2px;border-radius:8px;background:var(--solid);border:1px solid var(--line2);box-shadow:0 6px 18px rgba(0,0,0,.35);opacity:0;pointer-events:none;transition:opacity .12s;z-index:2;white-space:nowrap}
+.msg.in .mact{right:-8px}
+.msg.out .mact{left:-8px}
+.msg:hover .mact,.msg:focus-within .mact{opacity:1;pointer-events:auto}
+.msg .mact button{border:0;background:none;color:var(--text);width:26px;height:24px;border-radius:6px;cursor:pointer;font-size:14px;line-height:1}
+.msg .mact button:hover{background:rgba(160,170,255,.15)}
+.msg .mact button:disabled{opacity:.3;cursor:default}
+.msg.stk .mact,.msg.bigemo .mact{top:-6px}
+.msg.hl{animation:mhl 1.4s ease-out}
+@keyframes mhl{0%,40%{box-shadow:0 0 0 2px var(--cyan),0 0 26px rgba(56,225,240,.5)}100%{box-shadow:none}}
+.chatbox .rbar{display:flex;align-items:center;gap:8px;padding:6px 8px;margin:0 0 6px;border-left:3px solid var(--cyan);border-radius:6px;background:rgba(56,225,240,.07);min-height:34px}
+.chatbox .rbar.hide{display:none}
+.chatbox .rbar .ricon{color:var(--cyan);font-size:15px}
+.chatbox .rbar .rbody{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.chatbox .rbar .rbody b{font-size:11.5px;color:var(--cyan)}
+.chatbox .rbar .rbody span{font-size:12.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chatbox .feed{padding-top:16px}
+/* громкость звука показа */
+.stools .svol{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:12px}
+.stools .svol input{width:110px}
+.stools .svol em{font-style:normal;min-width:34px;text-align:right}
+.stools .svol .gi{width:16px;height:16px}
+
+/* 3.2: оформление канала — иконка и подложка (карточка в списке, шапка канала, свёрнутый список) */
+.tart{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:0}
+.tart img,.tart .trep{position:absolute;inset:0;width:100%;height:100%}
+.tart .ttint{position:absolute;inset:0;mix-blend-mode:color}
+.chan.cart{position:relative;overflow:hidden}
+.chan.cart>:not(.tart){position:relative;z-index:1}
+.cicon{width:26px;height:26px;border-radius:8px;object-fit:cover;flex:none;box-shadow:0 0 0 1px var(--line2)}
+.cicon.big{width:36px;height:36px;border-radius:10px}
+.chanmini{overflow:visible}
+.chanmini .cicon{width:100%;height:100%;border-radius:50%;box-shadow:none;display:block}
+.vrhead{position:relative}
+.vrhead .vrback{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:0}
+.vrhead>:not(.vrback){position:relative;z-index:1}
+.vtitle{display:flex;align-items:center;gap:10px}
+.chart{display:grid;grid-template-columns:220px 1fr;gap:12px;align-items:start;margin-top:6px}
+.chart .chprev{min-height:74px}
+.chart .chctl{display:flex;flex-direction:column;gap:8px}
+.chart .lbl{min-width:96px;font-size:12.5px;color:var(--muted)}
+.chart .tval{font-style:normal;font-size:12px;color:var(--muted);min-width:40px;text-align:right}
+@media (max-width:760px){.chart{grid-template-columns:1fr}}
+/* агенты: этап и ожидание */
+.ag-phase{margin-top:4px;color:var(--cyan);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ag-phase.wait{color:var(--amber)}
+.log.ag .ag-ph{color:var(--cyan);font-weight:600;margin:8px 0 2px}
+/* 3.3 — диаграммы: полоса свойств фигур и связей, меню фигур, шаблоны, «Из текста» */
+.bddg{top:112px;left:66px;padding:5px 8px;display:flex;align-items:center;gap:3px;flex-wrap:wrap;max-width:calc(100% - 300px)}
+.bd.full .bddg{top:166px}
+@container (max-width:980px){.bddg{top:auto;bottom:162px;left:12px;max-width:calc(100% - 24px)}}
+.bddg .tool{width:32px;height:32px}
+.bddg .tool .gi{width:17px;height:17px}
+.bddg .dgl{font-size:11.5px;color:var(--muted);margin:0 4px 0 2px;white-space:nowrap}
+.bddg .fsw{width:20px;height:20px;border-radius:6px;position:relative;overflow:hidden}
+.bddg .fsw i{position:absolute;left:-3px;right:-3px;top:50%;height:2px;background:var(--red,#FF4F64);transform:rotate(-45deg)}
+.bddg .dgw{display:block;width:16px;background:var(--text);border-radius:2px}
+.bddg .dgk{display:flex;align-items:center;gap:4px;padding:0 8px}
+.bddg .dgk span{font-size:10px;opacity:.7}
+.bddg .dgh{padding:0 6px;display:flex;align-items:center}
+.hdic.flip{transform:scaleX(-1)}
+.shic{display:block}
+.bdshapes .shq{width:100%;box-sizing:border-box;margin-bottom:4px}
+.bdshapes .shg{margin-top:6px}
+.shgrid{display:grid;grid-template-columns:repeat(6,1fr);gap:4px}
+.shb{height:40px;border-radius:9px;border:1px solid var(--line);background:rgba(160,170,255,.05);display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0}
+.shb:hover{background:rgba(160,170,255,.12)}
+.shb.on{border-color:var(--cyan);background:rgba(56,225,240,.12)}
+.hdrow{display:flex;align-items:center;gap:10px;width:100%;background:none;border:1px solid transparent;border-radius:8px;color:var(--text);cursor:pointer;padding:5px 8px;font:inherit;font-size:13px;text-align:left}
+.hdrow:hover{background:rgba(160,170,255,.08)}
+.hdrow.on{border-color:rgba(56,225,240,.5);background:rgba(56,225,240,.08)}
+.hdrow .gi{width:18px;height:18px}
+.dgh3{font-weight:300;font-family:var(--display);font-size:22px;margin:0 0 6px}
+.tplgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px}
+.tplc{display:flex;flex-direction:column;align-items:flex-start;gap:4px;padding:8px;border-radius:12px;border:1px solid var(--line2);background:rgba(160,170,255,.04);color:var(--text);cursor:pointer;text-align:left;font:inherit}
+.tplc:hover{border-color:var(--cyan)}
+.tplc canvas{width:100%;height:auto;border-radius:8px;display:block}
+.mmwrap{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media (max-width:820px){.mmwrap{grid-template-columns:1fr}}
+.mmtext{min-height:300px;width:100%;box-sizing:border-box;font-size:13px;line-height:1.5;resize:vertical}
+.mmpv{width:100%;height:auto;border-radius:10px;border:1px solid var(--line2);display:block}
+.mmerr{margin-top:6px;min-height:18px}
+.mmerr.bad{color:var(--red,#FF4F64)}
+.modal .card:has(.mmwrap),.modal .card:has(.tplgrid){width:min(980px,100%)}
+body.bdfull .modal{z-index:70}
+.pop.bdshapes{max-width:320px}
+/* полосы доски — в одну строку (длинная прокручивается), чтобы не наезжать друг на друга */
+.bdtxt,.bddg{flex-wrap:nowrap!important;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
+.bdtxt>*,.bddg>*{flex-shrink:0}
+@container (max-width:980px){.bddg{bottom:164px}}
+.bdtxt .txva{display:flex;align-items:center;gap:4px}
+/* 3.3.1 — статус участника */
+.stedit{display:flex;align-items:center;gap:10px}
+.stedit input{min-width:0}
+.sticon{width:28px;height:28px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;overflow:hidden;box-shadow:inset 0 0 0 1px rgba(255,255,255,.12)}
+.sticon.empty{border:1px dashed var(--line2)}
+.sticon img{width:100%;height:100%;object-fit:cover}
+.stcount{min-width:52px;text-align:right}
+.stsw{width:22px;height:22px;border-radius:50%;border:2px solid rgba(255,255,255,.15);cursor:pointer;padding:0}
+.stsw.on{box-shadow:0 0 0 2px var(--solid),0 0 0 4px var(--cyan)}
+.stpop{position:fixed;z-index:65;pointer-events:none;max-width:300px;display:flex;gap:9px;align-items:flex-start;padding:9px 12px;border-radius:12px;background:var(--solid);border:1px solid var(--line2);box-shadow:0 14px 40px rgba(0,0,0,.45);font-size:13px;line-height:1.4;animation:popin .12s ease-out}
+.stpop .sticon{width:22px;height:22px;margin-top:-1px}
+.stpop b{display:block;font-size:11.5px;color:var(--muted);font-weight:600;margin-bottom:2px}
+.stpop span.t{white-space:pre-wrap;overflow-wrap:anywhere}
+.tile .stdot{display:inline-block;vertical-align:-1px;margin-right:6px;width:11px;height:11px;border-radius:50%;box-shadow:0 0 0 2px rgba(11,12,26,.6);overflow:hidden}
+.tile .stdot img{width:100%;height:100%;object-fit:cover;display:block}
+/* 3.3.1 — вопрос агента людям */
+.agask{margin:0 0 10px;padding:12px 14px;border-radius:12px;border:1px solid rgba(255,181,71,.55);background:rgba(255,181,71,.07);display:flex;flex-direction:column;gap:8px}
+.agask .row{gap:10px;align-items:baseline}
+.agask .agq{white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px}
+.agask .agbtns{flex-wrap:wrap;gap:6px}
+.log.ag .ag-ask{margin:6px 0;padding:6px 10px;border-left:3px solid var(--amber,#FFB547);background:rgba(255,181,71,.06);white-space:pre-wrap}
+.log.ag .ag-ans{margin:2px 0 6px;padding:2px 10px;color:var(--green,#5DE08E)}
+/* 3.3.1 — дерево общих папок и синхронизация */
+.fs-dir{cursor:pointer}
+.fs-dir:hover{background:rgba(160,170,255,.06)}
+.fs-caret{display:inline-block;width:12px;color:var(--muted)}
+.fstabs{display:flex;gap:4px;margin:10px 0 4px;border-bottom:1px solid var(--line)}
+.fstabs button{background:none;border:0;border-bottom:2px solid transparent;color:var(--muted);padding:6px 12px;cursor:pointer;font:inherit;font-size:13px}
+.fstabs button.on{color:var(--text);border-bottom-color:var(--cyan)}
+.fsplan{margin-top:8px}

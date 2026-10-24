@@ -1,0 +1,18 @@
+[package]
+name = "bridge-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+base64.workspace = true
+hex.workspace = true
+rand.workspace = true
+unicode-normalization.workspace = true
+parking_lot.workspace = true
+uuid.workspace = true
+indexmap.workspace = true

@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Показ — Мост</title>
+<link rel="icon" href="/favicon.svg">
+<style>
+@font-face{font-family:"Exo 2";font-weight:100 900;src:url(/assets/fonts/exo2-cyrillic.woff2) format('woff2');unicode-range:U+0400-045F}
+@font-face{font-family:"Exo 2";font-weight:100 900;src:url(/assets/fonts/exo2-latin.woff2) format('woff2');unicode-range:U+0000-00FF,U+2000-206F}
+html,body{margin:0;height:100%;background:#000;overflow:hidden;color:#E8EAFB;font:600 12px/1 "Exo 2",system-ui,sans-serif;letter-spacing:.14em;text-transform:uppercase}
+video{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
+#bar{position:fixed;left:0;right:0;top:0;display:flex;align-items:center;gap:10px;padding:12px 16px;background:linear-gradient(180deg,rgba(6,7,18,.85),transparent);transition:opacity .3s}
+#bar.idle{opacity:0;pointer-events:none}
+#t{opacity:.85}
+.grow{flex:1}
+button{font:inherit;letter-spacing:inherit;text-transform:inherit;color:#0B0C1A;background:#E9ECFF;border:0;border-radius:999px;padding:8px 14px;cursor:pointer}
+button.ghost{background:transparent;color:#E8EAFB;box-shadow:inset 0 0 0 1px rgba(160,170,255,.3)}
+button:hover{box-shadow:0 0 0 3px rgba(255,79,100,.3),0 0 18px rgba(255,79,100,.4)}
+.hide{display:none}
+#end{position:fixed;inset:0;display:none;align-items:center;justify-content:center;font-size:14px;color:#8A8FB4}
+body.ended #end{display:flex}
+body.ended video{display:none}
+#ann{position:fixed;inset:0;width:100%;height:100%;pointer-events:none}
+body.m-ping #ann,body.m-draw #ann{pointer-events:auto;cursor:crosshair}
+#tools{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);display:flex;gap:6px;padding:6px;border-radius:999px;background:rgba(14,15,34,.88);box-shadow:0 10px 30px rgba(0,0,0,.5),inset 0 0 0 1px rgba(160,170,255,.25);transition:opacity .3s}
+#tools button{background:transparent;color:#E8EAFB;padding:8px 12px;display:flex;align-items:center;gap:6px}
+#tools button.on{background:rgba(56,225,240,.18);color:#38E1F0}
+#tools svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+body.idle:not(.m-ping):not(.m-draw) #tools{opacity:0;pointer-events:none}
+#vol{display:flex;align-items:center;gap:8px;letter-spacing:0}
+#vol input{width:120px}
+#vol em{font-style:normal;min-width:36px;text-align:right}
+#line{position:fixed;left:0;right:0;top:0;height:2px;background:#FF4F64;box-shadow:0 0 12px #FF4F64;opacity:.8}
+body.idle{cursor:none}
+</style>
+</head>
+<body>
+<div id="line"></div>
+<video id="v" autoplay playsinline></video>
+<canvas id="ann"></canvas>
+<div id="tools"><button id="tp" title="Указка: щелчок — пинг, его видят все (P)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8"/></svg>Пинг</button><button id="td" title="Рисовать поверх — видят все, через несколько секунд исчезает (D)"><svg viewBox="0 0 24 24"><path d="M4 20l4-1 10-10-3-3L5 16z"/><path d="M14 6l3 3"/></svg>Рисовать</button><button id="tc" title="Стереть свои пометки"><svg viewBox="0 0 24 24"><path d="M8 20h12M5 15l9-9 5 5-8 8H8z"/></svg>Стереть</button></div>
+<div id="bar"><span id="t"></span><div class="grow"></div><label id="vol" title="Громкость звука показа (запоминается)"><input type="range" min="0" max="1" step="0.05"><em></em></label><button id="snd" class="ghost hide">Включить звук</button><button id="fs">Во весь экран</button></div>
+<div id="end">Показ закончился</div>
+<script>
+// Отдельное окно показа: видео берётся у панели, которая открыла окно (тот же мост, тот же ПК).
+const [id, label] = decodeURIComponent(location.hash.slice(1)).split('|');
+const v = document.getElementById('v'), bar = document.getElementById('bar'), snd = document.getElementById('snd');
+document.getElementById('t').textContent = label || 'Показ';
+document.title = (label || 'Показ') + ' — Мост';
+const R = () => { try { return opener && !opener.closed ? opener.R : null; } catch { return null; } };
+let mutedByPolicy = false;
+async function play(){
+  const r = R(); v.muted = !!(r && r.deaf);
+  try { await v.play(); } catch { v.muted = true; mutedByPolicy = true; snd.classList.remove('hide'); try { await v.play(); } catch {} }
+}
+function attach(){
+  const r = R(); if (!r) { window.close(); return; }
+  const s = r.remote[id];
+  if (!s || !s.active) { document.body.classList.add('ended'); return; }
+  document.body.classList.remove('ended');
+  if (v.srcObject !== s) { v.srcObject = s; play(); }
+  if (!mutedByPolicy) v.muted = !!r.deaf;
+}
+snd.onclick = () => { mutedByPolicy = false; v.muted = false; v.play(); snd.classList.add('hide'); };
+const full = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen().catch(() => {});
+document.getElementById('fs').onclick = full;
+v.addEventListener('dblclick', full);
+addEventListener('keydown', e => { if (e.code === 'KeyF') full(); });
+document.addEventListener('fullscreenchange', () => { document.getElementById('fs').textContent = document.fullscreenElement ? 'Свернуть' : 'Во весь экран'; });
+// полоска сверху видна при движении мыши
+let idleT;
+function wake(){ bar.classList.remove('idle'); document.body.classList.remove('idle'); clearTimeout(idleT); idleT = setTimeout(() => { bar.classList.add('idle'); document.body.classList.add('idle'); }, 2500); }
+addEventListener('mousemove', wake); wake();
+attach(); setInterval(attach, 1000);
+// громкость: та же, что в панели (своя для каждого показывающего)
+const volIn = document.querySelector('#vol input'), volEm = document.querySelector('#vol em');
+window.__setVol = x => { v.volume = x; volIn.value = x; volEm.textContent = Math.round(x * 100) + '%'; };
+try { const s0 = opener && opener.__scr; if (s0) window.__setVol(s0.vol(id)); } catch {}
+volIn.oninput = () => { const x = +volIn.value; v.volume = x; volEm.textContent = Math.round(x * 100) + '%'; try { opener.__scr.setVol(id, x); } catch {} };
+
+// ── пинг и рисование поверх показа: те же пометки, что в панели (их видят все, кто смотрит, и показывающий) ──
+const C = document.getElementById('ann'), ctx = C.getContext('2d'), S = () => { try { return opener && opener.__scr; } catch { return null; } };
+let mode = '', line = null, lastSend = 0;
+function setMode(m){ mode = mode === m ? '' : m; document.body.classList.toggle('m-ping', mode === 'ping'); document.body.classList.toggle('m-draw', mode === 'draw'); document.getElementById('tp').classList.toggle('on', mode === 'ping'); document.getElementById('td').classList.toggle('on', mode === 'draw'); }
+document.getElementById('tp').onclick = () => setMode('ping');
+document.getElementById('td').onclick = () => setMode('draw');
+document.getElementById('tc').onclick = () => { const s = S(); if (s) s.ann(id, { k: 'clear' }); };
+addEventListener('keydown', e => { if (e.code === 'KeyP') setMode('ping'); else if (e.code === 'KeyD') setMode('draw'); else if (e.code === 'Escape' && mode) setMode(''); });
+function box(){ const vw = v.videoWidth || 16, vh = v.videoHeight || 9, k = Math.min(innerWidth / vw, innerHeight / vh), w = vw * k, h = vh * k; return { x: (innerWidth - w) / 2, y: (innerHeight - h) / 2, w, h }; }
+function pt(e){ const b = box(); return { x: +((e.clientX - b.x) / b.w).toFixed(4), y: +((e.clientY - b.y) / b.h).toFixed(4), inside: e.clientX >= b.x && e.clientX <= b.x + b.w && e.clientY >= b.y && e.clientY <= b.y + b.h }; }
+C.addEventListener('pointerdown', e => {
+  const s = S(); if (!s || !mode) return; e.preventDefault(); C.setPointerCapture(e.pointerId); const p = pt(e);
+  if (mode === 'ping') { if (p.inside) s.ann(id, { k: 'ping', x: p.x, y: p.y }); return; }
+  line = { k: 'line', id: s.session + Date.now().toString(36), pts: [p.x, p.y] };
+});
+C.addEventListener('pointermove', e => { const s = S(); if (!s || !line) return; const p = pt(e); line.pts.push(p.x, p.y); if (Date.now() - lastSend > 60) { lastSend = Date.now(); s.ann(id, line); } });
+const end = () => { const s = S(); if (s && line) { line.done = true; s.ann(id, line); } line = null; };
+C.addEventListener('pointerup', end); C.addEventListener('pointercancel', end);
+function draw(){
+  requestAnimationFrame(draw);
+  const d = devicePixelRatio || 1; if (C.width !== Math.round(innerWidth * d) || C.height !== Math.round(innerHeight * d)) { C.width = Math.round(innerWidth * d); C.height = Math.round(innerHeight * d); }
+  ctx.setTransform(d, 0, 0, d, 0, 0); ctx.clearRect(0, 0, innerWidth, innerHeight);
+  const s = S(); if (!s) return; const b = box(), now = Date.now();
+  for (const it of s.items(id)) {
+    if (it.k === 'ping') {
+      const age = (now - it.t) / 2600; if (age > 1) continue; const px = b.x + it.x * b.w, py = b.y + it.y * b.h;
+      for (let i = 0; i < 2; i++) { const a = Math.max(0, age - i * 0.18); ctx.strokeStyle = it.col; ctx.globalAlpha = Math.max(0, 1 - a) * 0.9; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(px, py, 6 + a * 46, 0, Math.PI * 2); ctx.stroke(); }
+      ctx.globalAlpha = Math.max(0, 1 - age); ctx.fillStyle = it.col; ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.font = '700 12px system-ui, sans-serif'; const label = it.by === s.me() ? 'вы' : s.title(it.by), tw = ctx.measureText(label).width;
+      ctx.fillRect(px + 10, py - 26, tw + 10, 18); ctx.fillStyle = '#0B0C1A'; ctx.fillText(label, px + 15, py - 13);
+    } else if (it.k === 'line' && it.pts.length >= 2) {
+      const fade = it.done ? Math.max(0, 1 - Math.max(0, now - it.t - 4000) / 2000) : 1; if (!fade) continue;
+      ctx.globalAlpha = fade; ctx.strokeStyle = it.col; ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.beginPath();
+      ctx.moveTo(b.x + it.pts[0] * b.w, b.y + it.pts[1] * b.h); for (let i = 2; i < it.pts.length; i += 2) ctx.lineTo(b.x + it.pts[i] * b.w, b.y + it.pts[i + 1] * b.h); ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+draw();
+</script>
+</body>
+</html>

@@ -1,0 +1,40 @@
+# ── сборка ──
+/target/
+/publish/
+/app/gen/
+**/*.rs.bk
+
+# ── панель (Svelte) ──
+/ui/node_modules/
+/ui/dist/
+/ui/.svelte-kit/
+/ui/.vite/
+*.tsbuildinfo
+
+# ── данные и журналы запущенного моста (если запускать прямо из папки проекта) ──
+bridge.json
+bridge-data/
+*.log
+logs/
+*.old
+*.mostboard
+
+# ── ключи и секреты ──
+*.token
+*.key
+*.pem
+.env
+.env.*
+
+# ── редакторы и система ──
+.vs/
+.vscode/
+.idea/
+*.user
+*.swp
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ── черновики ──
+_tmp/
