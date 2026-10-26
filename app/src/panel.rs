@@ -259,6 +259,8 @@ async fn dispatch(node: Arc<Node>, req: tauri::http::Request<Vec<u8>>) -> tauri:
         app_cmd(&node, cmd.split('?').next().unwrap_or(""), &body);
         return tauri::http::Response::builder().status(200).header("Content-Type", "application/json").body(b"{\"ok\":true}".to_vec()).unwrap();
     }
+    // запрос из изолированной рамки приложения (адрес «null») — без ключа моста: приложения ходят только через панель
+    let sandboxed = req.headers().get("origin").and_then(|v| v.to_str().ok()) == Some("null");
     let mut b = axum::http::Request::builder().method(req.method().clone()).uri(&path);
     for (k, v) in req.headers() {
         let name = k.as_str();
@@ -267,7 +269,10 @@ async fn dispatch(node: Arc<Node>, req: tauri::http::Request<Vec<u8>>) -> tauri:
         }
         b = b.header(k, v);
     }
-    b = b.header("host", "127.0.0.1").header(bridge_core::LOCAL_TOKEN_HEADER, node.local_token.as_str());
+    b = b.header("host", "127.0.0.1");
+    if !sandboxed {
+        b = b.header(bridge_core::LOCAL_TOKEN_HEADER, node.local_token.as_str());
+    }
     let mut r = match b.body(axum::body::Body::from(req.into_body())) {
         Ok(r) => r,
         Err(e) => return text(400, &e.to_string()),

@@ -5,12 +5,13 @@ import { esc } from './util';
 export type StatusInfo = { name: string; text?: string; color?: string; img?: string } | null;
 let pop: HTMLDivElement | null = null;
 function hide() { if (pop) { pop.remove(); pop = null; } }
+export const hideStatusPop = hide;
 
 export function statusHover(node: HTMLElement, info: StatusInfo) {
   let st = info;
   const move = (e: PointerEvent) => {
     const has = st && (st.text || st.color || st.img);
-    if (!has || (e.target as HTMLElement).closest('button, a, input, video, [role="button"]')) { hide(); return; }
+    if (!has || document.querySelector('.stmenu') || (e.target as HTMLElement).closest('button, a, input, video, [role="button"]')) { hide(); return; }
     if (!pop) {
       pop = document.createElement('div'); pop.className = 'stpop'; pop.setAttribute('role', 'tooltip');
       document.body.appendChild(pop);

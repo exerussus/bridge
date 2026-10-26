@@ -29,6 +29,9 @@ const HELP: &str = "Exerussus.Bridge — узел моста (файлы, общ
 
 Файлы:
   bridge send <сосед> <файл> [путь-у-соседа]   отправить файл
+  bridge app new <id> [папка]                   заготовка приложения (веб-интерфейс + SDK)
+  bridge app check <папка>                      проверить app.json
+  bridge app pack <папка> [--out файл]          упаковать приложение в .most-app
   bridge ignore [add|remove|set|test] …         игнор (--folder id | --mount сосед/id)
 
 Записи:
@@ -119,6 +122,7 @@ async fn run_cli(args: Vec<String>) -> i32 {
             0
         }),
         "run" => run(&o).await,
+        "app" => app_cli(&o),
         "mcp" => mcp::serve(&o).await,
         "ui" | "panel" | "панель" => NodeConfig::load(&config_path(&o)).map(|cfg| {
             let url = cfg.listen.iter().find(|l| l.contains("127.0.0.1") || l.contains("localhost")).cloned().unwrap_or(cfg.listen[0].clone());
@@ -409,6 +413,34 @@ fn err_text(text: &str, code: u16) -> String {
 
 fn enc(s: &str) -> String {
     bridge_node::client::esc(s)
+}
+
+/// Приложения без запущенного моста: заготовка, проверка, упаковка.
+fn app_cli(o: &Opts) -> Result<i32, String> {
+    match arg(o, 1, "new | check | pack")? {
+        "new" => {
+            let id = arg(o, 2, "id приложения")?;
+            let dir = std::path::PathBuf::from(o.pos.get(3).cloned().unwrap_or_else(|| id.to_string()));
+            bridge_node::apps::template(&dir, id)?;
+            println!("Заготовка: {}\nПоложите папку в «приложения» рядом с мостом — он подхватит её сам.", dir.display());
+            Ok(0)
+        }
+        "check" => {
+            let dir = std::path::PathBuf::from(arg(o, 2, "папка приложения")?);
+            let text = std::fs::read_to_string(dir.join("app.json")).map_err(|e| format!("app.json: {}", e))?;
+            let a = bridge_node::apps::parse_manifest(&dir, &text)?;
+            println!("app.json в порядке: {} «{}» {}", a.id, a.name, a.version);
+            Ok(0)
+        }
+        "pack" => {
+            let dir = std::path::PathBuf::from(arg(o, 2, "папка приложения")?);
+            let out = o.opt.get("out").map(std::path::PathBuf::from);
+            let (p, n) = bridge_node::apps::pack(&dir, out)?;
+            println!("Упаковано: {} ({} файлов)", p.display(), n);
+            Ok(0)
+        }
+        x => Err(format!("bridge app {}: нет такой команды (new, check, pack)", x)),
+    }
 }
 
 fn arg<'a>(o: &'a Opts, i: usize, what: &str) -> Result<&'a str, String> {

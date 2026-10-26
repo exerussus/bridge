@@ -5,6 +5,7 @@
   import TileArt from '../components/TileArt.svelte';
   import { tileOf, tileImgUrl, stImgUrl, tileVars, tileCls } from '../lib/tile.svelte';
   import { statusHover } from '../lib/statuspop';
+  import { openStatusMenu } from '../lib/statusmenu';
   // Каналы: слева список каналов, в центре канал (вкладки «Участники», «Показы», «Доска») и панель управления внизу,
   // справа чат. Кнопки панели не исчезают и не двигаются: недоступное — серое.
   import { ui, SET, setSet, titleOf, me, openModal } from '../lib/state.svelte';
@@ -53,6 +54,8 @@
   const ROSTER_OF = () => (R.key && ROSTER[R.key]) || {};
   const shortInd = (st: any) => (!st ? '' : (st.dev ? '📱' : '') + (st.voice === false ? '🎙✕' : st.deaf ? '🔇' : !st.mic ? '🎙✕' : '🎙') + (st.streams && st.streams.length ? '🖥' : ''));
 
+  // статус: из состояния канала (приходит сразу), у старых версий — из плитки
+  const tileStatus = (tl: any) => (tl && tl.style && (tl.style.stText || tl.style.stColor || tl.stImg || tl.style.stSilent) ? { text: tl.style.stText || '', color: tl.style.stColor || '', silent: !!tl.style.stSilent, img: tl.stImg || '' } : null);
   // ── снимок для отрисовки (движок говорит о переменах счётчиком V.v) ──
   const S = $derived.by(() => {
     void V.v; void ui.ov; void CHT.list;
@@ -232,23 +235,24 @@
               {@const streams = (t.st && t.st.streams) || []}
               {@const ind = IND(t.st)}
               {@const tl = tileOf(t.name)}
-              <div class="tile {cls} {tileCls(tl?.style)}" style={tileVars(tl?.style)} class:speaking={SPK[t.mine ? '__me' : t.name]} class:sharing={streams.length > 0} class:greeting={GREET[t.name]} use:flash={PINGED[t.name] || 0} use:dropSend={t.mine ? null : t.name} use:statusHover={tl ? { name: t.name, text: tl.style?.stText, color: tl.style?.stColor, img: tl.stImg ? stImgUrl(t.name, tl.stImg) : '' } : null}>
+              {@const sts = t.st && 'sts' in t.st ? t.st.sts : tileStatus(tl)}
+              <div class="tile {cls} {tileCls(tl?.style)}" style={tileVars(tl?.style)} class:speaking={SPK[t.mine ? '__me' : t.name]} class:sharing={streams.length > 0} class:greeting={GREET[t.name]} use:flash={PINGED[t.name] || 0} use:dropSend={t.mine ? null : t.name} role="group" aria-label={t.mine ? "Вы" : titleOf(t.name)} oncontextmenu={t.mine ? openStatusMenu : undefined} use:statusHover={sts ? { name: t.name, text: sts.text, color: sts.color, img: sts.img ? stImgUrl(t.name, sts.img) : '' } : null}>
                 <TileArt st={tl?.style} url={tl ? tileImgUrl(t.name, tl.img) : ''} />
                 {#if streams.length}<button class="tshare" title={(t.mine ? 'Ваш показ: ' : 'Смотреть показ: ') + streams.map((x: any) => x.label).join(', ')} onclick={() => openShows(t.name, t.mine)}><Gi n="screen" />{#if streams.length > 1}<b>{streams.length}</b>{/if}</button>{/if}
                 {#if stLbl[cls]}<span class="stl">{stLbl[cls]}</span>{/if}
                 {#if t.mine}
-                  <div class="av me" title="Оформить свою плитку: картинка, маска, аватарка, цвета" role="button" tabindex="0" onclick={() => goSettings('tile')} onkeydown={e => { if (e.key === 'Enter') goSettings('tile'); }}><Av n={me()} title={me()} /></div>
+                  <div class="av me" title="Оформить свою плитку: картинка, маска, аватарка, цвета. Статус — правая кнопка по плитке" role="button" tabindex="0" onclick={() => goSettings('tile')} onkeydown={e => { if (e.key === 'Enter') goSettings('tile'); }}><Av n={me()} title={me()} /></div>
                 {:else}
                   <div class="av"><Av n={t.name} title={titleOf(t.name)} /></div>
                 {/if}
-                <b>{#if tl && (tl.stImg || tl.style?.stColor)}<i class="stdot" style={tl.stImg ? '' : 'background:' + tl.style?.stColor}>{#if tl.stImg}<img src={stImgUrl(t.name, tl.stImg)} alt="" />{/if}</i>{/if}{t.mine ? 'Вы' : titleOf(t.name)}</b>
+                <b>{#if sts && (sts.img || sts.color)}<i class="stdot" style={sts.img ? '' : 'background:' + sts.color}>{#if sts.img}<img src={stImgUrl(t.name, sts.img)} alt="" />{/if}</i>{/if}{t.mine ? 'Вы' : titleOf(t.name)}{#if sts?.silent}<span class="stsil" title="Полная тишина: звуки приложения у него выключены, пинги не проходят">🔕</span>{/if}</b>
                 <div class="inds">{#each ind as x}<span class="ind {x.cls}" title={x.tip}>{x.t}</span>{:else}<span class="ind">🎙 в разговоре</span>{/each}</div>
                 <span class="small muted tcs">{t.cs || ' '}</span>
                 {#if t.mine}
                   <div class="tact"></div>
                 {:else}
                   <div class="tact">
-                    <button class="b sm ib" title="Пинг — тихий сигнал у него" onclick={() => ping(t.name)}><Gi n="bell" /></button>
+                    <button class="b sm ib" title={sts?.silent ? 'У него полная тишина — пинг не прозвучит' : 'Пинг — тихий сигнал у него'} disabled={!!sts?.silent} onclick={() => ping(t.name)}><Gi n="bell" /></button>
                     <button class="b sm ib" title="Заглушить: отошёл, а у него шумит. Включить микрофон сможет только он сам" disabled={!(t.st && t.st.voice !== false && t.st.mic && !t.st.fm)} onclick={() => forceMute(t.name)}><Gi n="micoff" /></button>
                     <button class="b sm ib" title={'Громкость: ' + Math.round((R.vol[t.name] ?? 1) * 100) + '%'} disabled={!(t.st && t.st.voice && rm.voice)} onclick={e => popover(e.currentTarget as Element, 'vol-' + t.name, VolPop, { n: t.name })}><Gi n="sound" /></button>
                     {#if streams.length}

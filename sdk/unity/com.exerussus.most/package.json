@@ -1,0 +1,13 @@
+{
+  "name": "com.exerussus.most",
+  "version": "3.5.0",
+  "displayName": "Мост — SDK приложений",
+  "description": "Unity-приложения для моста (Exerussus.Bridge): сеансы с теми, кто в вашем голосовом канале, отправка байтов (надёжно / быстро / последнее), общее состояние, присутствие, часы сеанса, хранилище и журнал активности. Без привязки к сетевой библиотеке.",
+  "unity": "2022.3",
+  "author": { "name": "Exerussus", "url": "https://github.com/exerussus/bridge" },
+  "keywords": ["bridge", "most", "network", "sessions", "lan"],
+  "samples": [
+    { "displayName": "Курсоры", "description": "Курсоры всех в канале: «последнее» по ключу, точки — надёжно, общий счёт.", "path": "Samples~/Cursors" },
+    { "displayName": "Свои сообщения", "description": "Один канал — свои типы сообщений: заголовок-байт и сериализация на вашей стороне.", "path": "Samples~/TypedMessages" }
+  ]
+}

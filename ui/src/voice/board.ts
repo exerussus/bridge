@@ -1038,8 +1038,78 @@ async function addPdf(f, x, y) {
   try { doc.destroy(); } catch {}
   return maxW + 40 * zk;
 }
+// ── копирование объектов: Ctrl+C / Ctrl+X / Ctrl+V, Ctrl+D — дубликат ──
+// В буфер кладётся JSON с меткой most-board: выделенное, связи между ними (связь, у которой второй конец вне
+// выделения, становится свободной), а рамки и дорожки — вместе с тем, что на них лежит. Вставка — с новыми id.
+const CLIP_MARK = 'most-board';
+function clipPack() {
+  if (!B.sel.size) return null;
+  const ids = new Set([...B.sel].filter(id => B.objs.has(id)));
+  for (const id of [...ids]) {
+    const c = B.objs.get(id); if (!DG.isContainer(c)) continue;
+    for (const o of query(c.x, c.y, c.x + c.w, c.y + c.h, true)) { if (ids.has(o.id) || layerOf(o) !== layerOf(c) || o.t === 'link') continue; const b = box(o); if (b[0] >= c.x - 1 && b[1] >= c.y - 1 && b[2] <= c.x + c.w + 1 && b[3] <= c.y + c.h + 1) ids.add(o.id); }
+  }
+  for (const lid of linksOf(ids)) { const l = B.objs.get(lid); if (l && ends(l).every(x => ids.has(x))) ids.add(lid); }
+  const objs = [];
+  for (const id of ids) {
+    const o = copy(B.objs.get(id)); if (!o) continue;
+    if (o.t === 'link') {
+      const poly = (B.cache.get(id) || (box(B.objs.get(id)), B.cache.get(id)) || {}).g?.poly || [];
+      for (const [k, pi] of [['a', 0], ['b', poly.length - 1]] as [string, number][]) if (o[k] && o[k].id && !ids.has(o[k].id)) { const pt = poly[pi]; o[k] = pt ? { x: pt[0], y: pt[1] } : { x: 0, y: 0 }; }
+    }
+    objs.push(o);
+  }
+  if (!objs.length) return null;
+  return { [CLIP_MARK]: 1, room: B.room, objs };
+}
+function clipBox(objs) {
+  let b = null;
+  for (const o of objs) { if (o.t === 'link') { for (const k of ['a', 'b']) if (o[k] && !o[k].id) { const x = o[k].x, y = o[k].y; b = b ? [Math.min(b[0], x), Math.min(b[1], y), Math.max(b[2], x), Math.max(b[3], y)] : [x, y, x, y]; } continue; }
+    const x = box(o); b = b ? [Math.min(b[0], x[0]), Math.min(b[1], x[1]), Math.max(b[2], x[2]), Math.max(b[3], x[3])] : x.slice(); }
+  return b || [0, 0, 0, 0];
+}
+let pasteN = 0, lastPasteSig = '';
+async function clipPaste(pk, at) {
+  if (!canEdit() || !pk || !Array.isArray(pk.objs) || !pk.objs.length) return;
+  const src = pk.objs.slice(0, 3000), map = new Map(), gmap = new Map();
+  for (const o of src) if (o && o.id) map.set(o.id, newId());
+  const b = clipBox(src), sig = JSON.stringify(src.map(o => o.id));
+  pasteN = sig === lastPasteSig ? pasteN + 1 : 1; lastPasteSig = sig;
+  let dx, dy;
+  if (at) { dx = at[0] - (b[0] + b[2]) / 2; dy = at[1] - (b[1] + b[3]) / 2; } else { dx = dy = 30 * pasteN; }
+  if (SET.bSnap) { dx = Math.round(dx / 10) * 10; dy = Math.round(dy / 10) * 10; } else { dx = Math.round(dx); dy = Math.round(dy); }
+  const before = new Map(), after = new Map(), z0 = Date.now(), other = pk.room && pk.room !== B.room;
+  let zi = 0;
+  for (const o0 of [...src].sort((a, b2) => (a.z || 0) - (b2.z || 0))) {
+    if (!o0 || !map.has(o0.id)) continue;
+    const o = JSON.parse(JSON.stringify(o0)); o.id = map.get(o0.id); o.z = z0 + zi++; o.L = B.layer;
+    if (o.g) { if (!gmap.has(o.g)) gmap.set(o.g, newId()); o.g = gmap.get(o.g); }
+    if (o.t === 'link') { for (const k of ['a', 'b']) { if (!o[k]) continue; if (o[k].id) { if (map.has(o[k].id)) o[k] = { ...o[k], id: map.get(o[k].id) }; else o[k] = { x: 0, y: 0 }; } else o[k] = { ...o[k], x: o[k].x + dx, y: o[k].y + dy }; } }
+    else shiftTo(o, o0, dx, dy);
+    if (o.t === 'img' && other && o.src) { // картинка из другой доски — перенести файл сюда
+      try { const r0 = await fetch(aurl('board/image?room=' + encodeURIComponent(pk.room) + '&id=' + encodeURIComponent(o.src))); if (r0.ok) { const r = await api('POST', 'board/image?room=' + encodeURIComponent(B.room), await r0.blob(), true); o.src = r.id; } } catch {}
+    }
+    before.set(o.id, null); after.set(o.id, o);
+  }
+  // сначала фигуры, потом связи — чтобы концы нашлись
+  const ord = new Map([...after].sort((x, y) => (x[1].t === 'link' ? 1 : 0) - (y[1].t === 'link' ? 1 : 0)));
+  change(before, ord);
+  B.sel = new Set([...after.keys()]); setTool('select'); dirty();
+  toast('Вставлено: ' + after.size, 'ok');
+}
+function clipText(e) { try { const t = e.clipboardData?.getData('text/plain') || ''; if (!t.includes(CLIP_MARK)) return null; const v = JSON.parse(t); return v && v[CLIP_MARK] ? v : null; } catch { return null; } }
+const boardFocus = e => B.vis && !e.target.matches('input,textarea,select') && !e.target.isContentEditable && !popOpen() && !document.querySelector('.streams [data-stream]:hover');
+document.addEventListener('copy', e => { if (!boardFocus(e) || String(getSelection() || '')) return; const pk = clipPack(); if (!pk) return; e.preventDefault(); B.clip = pk; e.clipboardData.setData('text/plain', JSON.stringify(pk)); pasteN = 0; lastPasteSig = JSON.stringify(pk.objs.map(o => o.id)); toast('Скопировано: ' + pk.objs.length, 'ok'); });
+document.addEventListener('cut', e => {
+  if (!boardFocus(e) || String(getSelection() || '') || !canEdit()) return; const pk = clipPack(); if (!pk) return;
+  e.preventDefault(); B.clip = pk; e.clipboardData.setData('text/plain', JSON.stringify(pk)); pasteN = 0; lastPasteSig = '';
+  const ids = new Set(pk.objs.map(o => o.id).filter(id => B.objs.has(id))); for (const l of linksOf(ids)) ids.add(l);
+  change(new Map([...ids].map(id => [id, copy(B.objs.get(id))])), new Map([...ids].map(id => [id, null]))); B.sel.clear();
+});
 document.addEventListener('paste', e => {
   if (!B.vis || e.target.matches('input,textarea')) return;
+  const pk = clipText(e);
+  if (pk) { e.preventDefault(); clipPaste(pk, B.mouse.in ? [B.mouse.wx, B.mouse.wy] : null); return; }
   const files = [...(e.clipboardData?.files || [])].filter(f => /^image\//.test(f.type) || isPdf(f)); if (!files.length) return;
   e.preventDefault(); const [x, y] = B.mouse.in ? [B.mouse.wx, B.mouse.wy] : S2W(B.W / 2, B.H / 2); addFiles(files, x, y);
 });
@@ -1053,11 +1123,13 @@ document.addEventListener('keydown', e => {
   if (mod && (k === 'a' || k === 'ф')) { e.preventDefault(); const [x0, y0] = S2W(0, 0), [x1, y1] = S2W(B.W, B.H); for (const o of query(x0, y0, x1, y1)) if (inActive(o)) B.sel.add(o.id); setTool('select'); dirty(); return; }
   if ((e.key === 'Delete' || e.key === 'Backspace') && B.sel.size && canEdit()) { e.preventDefault(); const ids = new Set([...B.sel, ...linksOf(B.sel)]); const before = new Map([...ids].map(id => [id, copy(B.objs.get(id))])); change(before, new Map([...ids].map(id => [id, null]))); B.sel.clear(); return; }
   if (e.key === 'Tab' && B.sel.size === 1 && canEdit()) { const o = B.objs.get([...B.sel][0]); if (o && o.t === 'shape' && !DG.isContainer(o)) { e.preventDefault(); quickAdd(o, e.shiftKey ? { r: 'l', l: 'r', t: 'b', b: 't' }[B.lastSide || 'r'] : B.lastSide || 'r'); return; } }
+  if (mod && (k === 'd' || k === 'в') && B.sel.size && canEdit()) { e.preventDefault(); const pk = clipPack(); if (pk) { lastPasteSig = ''; pasteN = 0; clipPaste(pk, null); } return; }
   if (mod && (k === 'g' || k === 'п')) { e.preventDefault(); arrange(e.shiftKey ? 'ungroup' : 'group'); return; }
   if (e.key === 'Escape') { if (B.full) { full(false); return; } B.sel.clear(); dirty(); return; }
   if (e.key === '+' || e.key === '=') { zoomAt(B.W / 2, B.H / 2, B.view.z * 1.25); return; }
   if (e.key === '-') { zoomAt(B.W / 2, B.H / 2, B.view.z / 1.25); return; }
   if (mod || e.altKey) return;
+  if (document.querySelector('.streams [data-stream]:hover')) return; // мышь над показом экрана — клавиши его инструментов
   const keys = { b: 'brush', и: 'brush', v: 'select', м: 'select', h: 'hand', р: 'hand', p: 'pen', з: 'pen', m: 'marker', ь: 'marker', e: 'eraser', у: 'eraser', r: 'rect', к: 'rect', a: 'arrow', ф: 'arrow', t: 'text', е: 'text', n: 'note', т: 'note', i: 'image', ш: 'image', l: 'link', д: 'link', s: 'shape', ы: 'shape' };
   if ((k === 'l' || k === 'д') && e.shiftKey) { toggleLayers(); return; }
   if (keys[k]) {

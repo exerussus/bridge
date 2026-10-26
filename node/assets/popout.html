@@ -39,7 +39,7 @@ body.idle{cursor:none}
 <div id="line"></div>
 <video id="v" autoplay playsinline></video>
 <canvas id="ann"></canvas>
-<div id="tools"><button id="tp" title="Указка: щелчок — пинг, его видят все (P)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8"/></svg>Пинг</button><button id="td" title="Рисовать поверх — видят все, через несколько секунд исчезает (D)"><svg viewBox="0 0 24 24"><path d="M4 20l4-1 10-10-3-3L5 16z"/><path d="M14 6l3 3"/></svg>Рисовать</button><button id="tc" title="Стереть свои пометки"><svg viewBox="0 0 24 24"><path d="M8 20h12M5 15l9-9 5 5-8 8H8z"/></svg>Стереть</button></div>
+<div id="tools"><button id="tp" title="Указка: щелчок — пинг, его видят все (W)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8"/></svg>Пинг</button><button id="td" title="Рисовать поверх — видят все, через несколько секунд исчезает (E)"><svg viewBox="0 0 24 24"><path d="M4 20l4-1 10-10-3-3L5 16z"/><path d="M14 6l3 3"/></svg>Рисовать</button><button id="te" title="Стёрка: проведите по своей линии (R)"><svg viewBox="0 0 24 24"><path d="M16 4l4 4-9 9H7l-3-3z"/><path d="M11 17h9"/></svg>Стёрка</button><button id="tc" title="Стереть все свои пометки"><svg viewBox="0 0 24 24"><path d="M8 20h12M5 15l9-9 5 5-8 8H8z"/></svg>Стереть</button></div>
 <div id="bar"><span id="t"></span><div class="grow"></div><label id="vol" title="Громкость звука показа (запоминается)"><input type="range" min="0" max="1" step="0.05"><em></em></label><button id="snd" class="ghost hide">Включить звук</button><button id="fs">Во весь экран</button></div>
 <div id="end">Показ закончился</div>
 <script>
@@ -81,21 +81,33 @@ volIn.oninput = () => { const x = +volIn.value; v.volume = x; volEm.textContent 
 
 // ── пинг и рисование поверх показа: те же пометки, что в панели (их видят все, кто смотрит, и показывающий) ──
 const C = document.getElementById('ann'), ctx = C.getContext('2d'), S = () => { try { return opener && opener.__scr; } catch { return null; } };
-let mode = '', line = null, lastSend = 0;
-function setMode(m){ mode = mode === m ? '' : m; document.body.classList.toggle('m-ping', mode === 'ping'); document.body.classList.toggle('m-draw', mode === 'draw'); document.getElementById('tp').classList.toggle('on', mode === 'ping'); document.getElementById('td').classList.toggle('on', mode === 'draw'); }
+let mode = '', line = null, lastSend = 0, erasing = false;
+function setMode(m, force){ mode = !force && mode === m ? '' : m; document.body.classList.toggle('m-ping', mode === 'ping'); document.body.classList.toggle('m-draw', mode === 'draw' || mode === 'erase'); for (const [b, k] of [['tp', 'ping'], ['td', 'draw'], ['te', 'erase']]) document.getElementById(b).classList.toggle('on', mode === k); }
+const KEYS0 = { mouse: 'KeyQ', ping: 'KeyW', draw: 'KeyE', erase: 'KeyR' };
+const keys = () => { try { const s = S(); return (s && s.keys && s.keys()) || KEYS0; } catch { return KEYS0; } };
+const kn = c => (c || '').replace(/^Key/, '').replace(/^Digit/, '');
+function hints(){ const k = keys(); document.getElementById('tp').title = 'Указка: щелчок — пинг, его видят все (' + kn(k.ping) + ')'; document.getElementById('td').title = 'Рисовать поверх — видят все, через несколько секунд исчезает (' + kn(k.draw) + ')'; document.getElementById('te').title = 'Стёрка: проведите по своей линии (' + kn(k.erase) + ')'; }
 document.getElementById('tp').onclick = () => setMode('ping');
 document.getElementById('td').onclick = () => setMode('draw');
+document.getElementById('te').onclick = () => setMode('erase');
+hints(); setInterval(hints, 3000);
 document.getElementById('tc').onclick = () => { const s = S(); if (s) s.ann(id, { k: 'clear' }); };
-addEventListener('keydown', e => { if (e.code === 'KeyP') setMode('ping'); else if (e.code === 'KeyD') setMode('draw'); else if (e.code === 'Escape' && mode) setMode(''); });
+addEventListener('keydown', e => {
+  if (e.ctrlKey || e.altKey || e.metaKey || e.repeat) return;
+  if (e.code === 'Escape' && mode) { setMode('', true); return; }
+  const k = keys(), tool = Object.keys(k).find(x => k[x] === e.code);
+  if (tool) { e.preventDefault(); setMode(tool === 'mouse' ? '' : tool, true); }
+});
 function box(){ const vw = v.videoWidth || 16, vh = v.videoHeight || 9, k = Math.min(innerWidth / vw, innerHeight / vh), w = vw * k, h = vh * k; return { x: (innerWidth - w) / 2, y: (innerHeight - h) / 2, w, h }; }
 function pt(e){ const b = box(); return { x: +((e.clientX - b.x) / b.w).toFixed(4), y: +((e.clientY - b.y) / b.h).toFixed(4), inside: e.clientX >= b.x && e.clientX <= b.x + b.w && e.clientY >= b.y && e.clientY <= b.y + b.h }; }
 C.addEventListener('pointerdown', e => {
   const s = S(); if (!s || !mode) return; e.preventDefault(); C.setPointerCapture(e.pointerId); const p = pt(e);
   if (mode === 'ping') { if (p.inside) s.ann(id, { k: 'ping', x: p.x, y: p.y }); return; }
+  if (mode === 'erase') { erasing = true; const b = box(); s.erase && s.erase(id, p.x, p.y, b.w, b.h); return; }
   line = { k: 'line', id: s.session + Date.now().toString(36), pts: [p.x, p.y] };
 });
-C.addEventListener('pointermove', e => { const s = S(); if (!s || !line) return; const p = pt(e); line.pts.push(p.x, p.y); if (Date.now() - lastSend > 60) { lastSend = Date.now(); s.ann(id, line); } });
-const end = () => { const s = S(); if (s && line) { line.done = true; s.ann(id, line); } line = null; };
+C.addEventListener('pointermove', e => { const s = S(); if (s && erasing) { const p = pt(e), b = box(); s.erase && s.erase(id, p.x, p.y, b.w, b.h); return; } if (!s || !line) return; const p = pt(e); line.pts.push(p.x, p.y); if (Date.now() - lastSend > 60) { lastSend = Date.now(); s.ann(id, line); } });
+const end = () => { erasing = false; const s = S(); if (s && line) { line.done = true; s.ann(id, line); } line = null; };
 C.addEventListener('pointerup', end); C.addEventListener('pointercancel', end);
 function draw(){
   requestAnimationFrame(draw);

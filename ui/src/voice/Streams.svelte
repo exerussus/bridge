@@ -3,7 +3,7 @@
   import { titleOf, SET } from '../lib/state.svelte';
   import { popover } from '../lib/pop';
   import { R, V, rosterOf, watch, popout, shareStop } from './engine.svelte';
-  import { SX, setMode, clearMine, release, decorate, streamVol, setStreamVol } from './screen.svelte';
+  import { SX, setMode, clearMine, release, decorate, streamVol, setStreamVol, scrKeys, keyName } from './screen.svelte';
   import { setSink } from '../lib/audio';
   import Gi from '../components/Gi.svelte';
   import CtlAskPop from './pops/CtlAskPop.svelte';
@@ -50,6 +50,7 @@
   {#each data.list as s (s.id)}
     {@const mode = SX.mode[s.id] || ''}
     {@const ctlMine = SX.cv.stream === s.id}
+    {@const K = scrKeys()}
     <div class="stream" data-stream={s.id}>
       <div class="row"><b><Gi n="screen" /> {titleOf(s.n)}</b><span class="small muted">{s.label}</span><div class="grow"></div>
         {#if s.watching}
@@ -66,9 +67,10 @@
         <div class="empty">Открыт в отдельном окне</div>
       {:else if s.watching && s.media}
         <div class="stools">
-          <button class="b sm ib" class:on={mode === 'ping'} title="Указка: щелчок по экрану — пинг, его видят все" onclick={() => setMode(s.id, 'ping')}><svg class="gi" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><circle cx="12" cy="12" r="8" /></svg></button>
-          <button class="b sm ib" class:on={mode === 'draw'} title="Рисовать поверх экрана — видят все, через несколько секунд исчезает" onclick={() => setMode(s.id, 'draw')}><Gi n="board" /></button>
-          <button class="b sm ib" title="Стереть свои пометки" onclick={() => clearMine(s.id)}><svg class="gi" viewBox="0 0 24 24"><path d="M8 20h12M5 15l9-9 5 5-8 8H8z" /></svg></button>
+          <button class="b sm ib" class:on={mode === 'ping'} title={'Указка: щелчок по экрану — пинг, его видят все (' + keyName(K.ping) + ')'} onclick={() => setMode(s.id, 'ping')}><svg class="gi" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><circle cx="12" cy="12" r="8" /></svg></button>
+          <button class="b sm ib" class:on={mode === 'draw'} title={'Карандаш: рисовать поверх экрана — видят все, через несколько секунд исчезает (' + keyName(K.draw) + ')'} onclick={() => setMode(s.id, 'draw')}><Gi n="board" /></button>
+          <button class="b sm ib" class:on={mode === 'erase'} title={'Стёрка: проведите по своей линии (' + keyName(K.erase) + ')'} onclick={() => setMode(s.id, 'erase')}><svg class="gi" viewBox="0 0 24 24"><path d="M16 4l4 4-9 9H7l-3-3z" /><path d="M11 17h9" /></svg></button>
+          <button class="b sm ib" title="Стереть все свои пометки" onclick={() => clearMine(s.id)}><svg class="gi" viewBox="0 0 24 24"><path d="M8 20h12M5 15l9-9 5 5-8 8H8z" /></svg></button>
           <i class="dsep" style="height:22px"></i>
           <label class="svol" title={'Громкость звука показа: ' + Math.round(volOf(s.id) * 100) + '% (запоминается для ' + titleOf(s.n) + ')'}><Gi n={volOf(s.id) === 0 ? 'mute' : 'sound'} /><input type="range" min="0" max="1" step="0.05" value={volOf(s.id)} oninput={e => setStreamVol(s.id, +(e.target as HTMLInputElement).value)} /><em>{Math.round(volOf(s.id) * 100)}%</em></label>
           <i class="dsep" style="height:22px"></i>

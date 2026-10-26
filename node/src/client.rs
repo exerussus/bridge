@@ -145,6 +145,13 @@ impl PeerClient {
         self
     }
 
+    /// Адрес WebSocket соседа и подпись запроса на него (GET без тела).
+    pub fn ws_target(&self, rel: &str) -> (String, String) {
+        let url = format!("{}{}", self.base, rel).replacen("https://", "wss://", 1).replacen("http://", "ws://", 1);
+        let auth = format!("{} {}", AUTH_SCHEME, signing::header(&self.self_name, &self.secret, "GET", rel, &signing::empty_body_sha(), self.legacy()));
+        (url, auth)
+    }
+
     pub fn legacy(&self) -> bool {
         self.legacy.load(Ordering::Relaxed)
     }

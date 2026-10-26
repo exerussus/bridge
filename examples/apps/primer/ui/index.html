@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Пример</title>
+<style>
+  :root { --bg: #0B0C1A; --panel: #12132A; --line: rgba(255,255,255,.12); --text: #E8EAFB; --muted: #9DA1C7; --acc: #38E1F0; }
+  body.light { --bg: #F6F7FC; --panel: #FFFFFF; --line: rgba(0,0,0,.12); --text: #14152B; --muted: #555a7a; }
+  body { margin: 0; padding: 20px; font: 14px system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  h1 { margin: 0 0 4px; font-size: 22px; font-weight: 600; }
+  .muted { color: var(--muted); font-size: 12px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-top: 14px; }
+  h2 { margin: 0 0 8px; font-size: 14px; }
+  textarea { width: 100%; box-sizing: border-box; min-height: 90px; background: transparent; color: inherit; border: 1px solid var(--line); border-radius: 10px; padding: 8px; font: inherit; }
+  button { font: inherit; padding: 7px 12px; border-radius: 10px; border: 1px solid var(--line); background: transparent; color: inherit; cursor: pointer; margin: 6px 6px 0 0; }
+  button.pri { border-color: var(--acc); }
+  #pad { height: 160px; border: 2px dashed var(--line); border-radius: 12px; display: flex; align-items: center; justify-content: center; text-align: center; cursor: pointer; user-select: none; }
+  #pad.on { border-color: var(--acc); border-style: solid; }
+  #log { font: 12px ui-monospace, monospace; white-space: pre-wrap; max-height: 120px; overflow: auto; margin-top: 8px; color: var(--muted); }
+</style>
+<script src="/most/sdk.js"></script>
+</head>
+<body>
+<h1 id="title">Пример</h1>
+<div class="muted" id="who">подключаюсь к мосту…</div>
+
+<section>
+  <h2>Заметка (хранится в мосте этого ПК)</h2>
+  <textarea id="note" placeholder="Напишите что-нибудь — сохранится само"></textarea>
+  <div class="muted" id="saved"></div>
+</section>
+
+<section>
+  <h2>Файлы и уведомления</h2>
+  <button id="pick">Открыть текстовый файл…</button>
+  <button id="save">Сохранить заметку в файл</button>
+  <button id="notify">Уведомление у часов</button>
+  <button id="pop" class="pri">В отдельное окно</button>
+</section>
+
+<section>
+  <h2>Захват мыши и клавиатуры</h2>
+  <div id="pad" tabindex="0">Щёлкните — мышь и клавиатура уйдут сюда.<br>Выход — Esc.</div>
+  <div id="log"></div>
+</section>
+
+<script>
+const $ = id => document.getElementById(id);
+most.on('theme', t => document.body.classList.toggle('light', t === 'light'));
+most.ready().then(async me => {
+  document.body.classList.toggle('light', me.theme === 'light');
+  $('who').textContent = 'Приложение «' + me.name + '» ' + me.version + ' на ПК «' + me.node + '» · права: ' + (me.granted.join(', ') || 'нет');
+  $('note').value = (await most.store.get('note')) || '';
+  let t = 0;
+  $('note').oninput = () => { clearTimeout(t); $('saved').textContent = '…'; t = setTimeout(async () => { await most.store.set('note', $('note').value); $('saved').textContent = 'сохранено'; most.window.badge($('note').value ? '●' : ''); }, 500); };
+}).catch(e => { $('who').textContent = 'Не в мосте: ' + e.message; });
+
+$('pick').onclick = async () => {
+  try { const [f] = await most.files.pick({ accept: '.txt,.md,text/plain' }); if (f) { $('note').value = await f.text(); $('note').oninput(); } }
+  catch (e) { most.toast(e.message); }
+};
+$('save').onclick = () => most.files.save('заметка.txt', $('note').value).catch(e => most.toast(e.message));
+$('notify').onclick = () => most.notify('Привет из приложения «Пример»').catch(e => most.toast(e.message));
+$('pop').onclick = () => most.window.popout();
+most.on('file', async f => { if (f && f.text) { $('note').value = await f.text(); $('note').oninput(); } });
+
+// захват: так будет устроен пульт телевизора — движения и клавиши уходят в службу, а она — в телевизор
+const pad = $('pad'), log = $('log');
+const say = s => { log.textContent = (s + '\n' + log.textContent).slice(0, 2000); };
+pad.onclick = () => pad.requestPointerLock && pad.requestPointerLock();
+document.addEventListener('pointerlockchange', () => { const on = document.pointerLockElement === pad; pad.classList.toggle('on', on); pad.innerHTML = on ? 'Ввод захвачен — двигайте мышью, жмите клавиши.<br>Выход — Esc.' : 'Щёлкните — мышь и клавиатура уйдут сюда.<br>Выход — Esc.'; if (on) pad.focus(); });
+let acc = [0, 0], lastT = 0;
+document.addEventListener('mousemove', e => { if (document.pointerLockElement !== pad) return; acc[0] += e.movementX; acc[1] += e.movementY; const n = Date.now(); if (n - lastT > 100) { say('мышь ' + acc[0] + ', ' + acc[1]); acc = [0, 0]; lastT = n; } });
+document.addEventListener('mousedown', e => { if (document.pointerLockElement === pad) say('кнопка ' + e.button); });
+pad.addEventListener('keydown', e => { if (document.pointerLockElement === pad && e.key !== 'Escape') { e.preventDefault(); say('клавиша ' + e.code + (e.key.length === 1 ? ' «' + e.key + '»' : '')); } });
+</script>
+</body>
+</html>

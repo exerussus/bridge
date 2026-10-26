@@ -27,10 +27,11 @@
   import Log from './tabs/Log.svelte';
   import Help from './tabs/Help.svelte';
   import Voice from './voice/Voice.svelte';
+  import Apps from './tabs/Apps.svelte';
 
   const NAV: (string | [string, string])[] = [
     ['home', 'Обзор'], 'Мост', ['peers', 'Соседи'], ['send', 'Отправка'], ['folders', 'Общие папки'], ['shares', 'Пространства'], ['records', 'Записи'],
-    'Связь', ['voice', 'Каналы'], ['agent', 'Агенты'], ['chat', 'Чаты'], ['assistant', 'Ассистент'], ['phone', 'Телефон'],
+    'Связь', ['voice', 'Каналы'], ['apps', 'Приложения'], ['agent', 'Агенты'], ['chat', 'Чаты'], ['assistant', 'Ассистент'], ['phone', 'Телефон'],
     'Настройка', ['settings', 'Настройки'], ['access', 'Права и группы'], ['log', 'Журнал'], ['help', 'Справка'],
   ];
   const WIRE: Record<string, number> = { cyan: 0, red: 1, amber: 2, green: 3, dim: -1 };
@@ -166,7 +167,7 @@
     <main>
       <div class="pagehead"><h1>{HEAD[ui.tab]?.[0] || ''}</h1><hr /><p>{HEAD[ui.tab]?.[1] || ''}</p></div>
       {#if ui.ready}
-        <section id="t-{ui.tab}" class:hide={ui.tab === 'voice'}>
+        <section id="t-{ui.tab}" class:hide={ui.tab === 'voice' || ui.tab === 'apps'}>
           {#if ui.tab === 'home'}<Home />
           {:else if ui.tab === 'peers'}<Peers />
           {:else if ui.tab === 'send'}<Send />
@@ -184,6 +185,8 @@
         </section>
         <!-- каналы всегда в панели: разговор, показы и доска живут, пока открыты другие вкладки -->
         <section id="t-voice" class:hide={ui.tab !== 'voice'}><Voice /></section>
+        <!-- приложения тоже всегда в панели: открытые не перезагружаются при переходе на другие вкладки -->
+        <section id="t-apps" class:hide={ui.tab !== 'apps'}><Apps /></section>
       {:else}
         <div class="empty">{ui.conn ? 'Мост не отвечает — запущен ли он?' : 'Загружаю…'}</div>
       {/if}

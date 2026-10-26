@@ -219,7 +219,7 @@ requests.post(B + "ui", json={"action": "join", "channel": "Семья"}, header
 - `POST control/grant {peer, keyboard, w, h}` — разрешить соседу управление (панель продлевает раз в 8 с; без продления разрешение гаснет через 30 с). `w`, `h` — размер показываемого монитора.
 - `POST control/input {peer, events}` — события `{t: m|d|u|w|kd|ku, x, y, b, dx, dy, c}` (x, y — доли монитора, c — KeyboardEvent.code); выполняются, только если разрешение есть и сосед тот же; клавиши — только если разрешена клавиатура.
 - `POST control/revoke` — отозвать (нажатые клавиши и кнопки отпускаются).
-- `POST overlay/ann {by, col, a, w, h}` — пометка зрителя поверх экрана (рисует трей).
+- `POST overlay/ann {by, col, a, w, h}` — пометка зрителя поверх экрана (рисует трей). `a.k`: `ping`, `line`, `clear` (все свои), `del` (3.3.4: своя линия `a.id`).
 - Ничего из этого недоступно с телефона.
 
 ## Обновление моста
@@ -238,6 +238,7 @@ requests.post(B + "ui", json={"action": "join", "channel": "Семья"}, header
 - `GET tile[?peer]` → `{style, img}` (`img` — отпечаток картинки-фона, пусто — нет). `GET tile/image[?peer]` — картинка.
 - `POST tile {style}` — стиль: `fit` (`cover|contain|repeat`), `x`, `y` (0–100 — точка фокуса), `zoom` (100–400), `mask` (`none|bottom|top|sides|vignette|circle|diagonal`), `soft` (0–100), `opacity` (5–100), `blur` (0–20), `tint` + `tintAmt` (0–100), `base` (цвет плитки), `border`, `glow` (подсветка, когда говорите), `name` (цвет имени), `avShape` (`circle|round|square|hex|none`), `avSize` (50–160), `avRing`. Цвета — `#rrggbb`; неизвестное отбрасывается.
 - `POST tile/image` (тело — JPEG/PNG/WebP/GIF до 4 МБ; гифка остаётся анимированной), `POST tile/image/remove`, `POST tile/reset`.
+- (3.3.4) `GET avatars` — ещё и `status` (свой статус: `{text, color, silent, img}` или `null`); панель шлёт его в состоянии канала, соседи видят сразу. `GET tile/status/image?peer&v` — если отпечаток `v` новее кэша, картинка берётся у соседа заново.
 - `GET avatars` — ещё и `tile` (свой отпечаток) и `tiles` (соседей). Соседи: `GET /peer/tile`, `GET /peer/tile/img`.
 
 ## Оформление канала
@@ -266,11 +267,137 @@ requests.post(B + "ui", json={"action": "join", "channel": "Семья"}, header
 
 `bridge mcp` — те же возможности как инструменты: `bridge_ui` (пульт: все действия выше), `bridge_board` (доска: смотреть, искать, класть, двигать, править, слои, фон, картинка доски), `bridge_screen` (снимок показа, пинг, линия, стереть), `bridge_api` (любой вызов), `bridge_peers`, `send_file`, `exchange_folder`, `agent_ask`, `agent_wait`, `agent_status`, `agent_stop`, `agent_threads`, и для ручного режима — `agent_wait_task`, `agent_inbox`, `agent_take`, `agent_progress`, `agent_report`. Строка подключения — в панели: «Агенты» → «Подключить к Claude».
 
+## Приложения (3.4)
+
+Папка `приложения` в папке моста: папка с `app.json` или пакет `.most-app` (zip с `app.json` в корне). Мост проверяет её раз в 2 с.
+
+`app.json`:
+- `id` (латиница в нижнем регистре, цифры, `-`, `_`, до 40), `name`, `version`, `description`, `author`, `icon` (путь к картинке);
+- `ui` — вход веб-интерфейса (`ui/index.html`); отдаются только файлы из его папки;
+- `native {cmd, args}` — своё окно (программа внутри приложения); `service {cmd, args, http, run: "open"|"always"}` — фоновая служба;
+- `actions [{id, title, run, params: [{id, title, type: text|number|select, options, default}], confirm}]` — кнопки; `run` — программа из пакета и аргументы, `{параметр}` подставляется отдельным аргументом, без оболочки; до 2 минут, вывод до 64 КБ;
+- `permissions`: `files.pick`, `files.save`, `files.read`, `notify`, `channel.post`, `peers`, `mail.send`, `sessions`, `activity`, `input.capture`;
+- `net {proto, max, transport: "bridge"|"external", leaveWithChannel}` — сетевое приложение (см. «Сеансы»); приложению с одним `net` (без ui, native и actions) окно не нужно — к нему подключаются из редактора или своей программы;
+- `window {w, h}`, `platforms ["windows"…]`, `dev` (адрес сервера разработки для папки), `launch`, `opens` — заделы.
+
+Локальный API:
+- `GET apps` → `{list: [{id, name, version, state: new|changed|ok|unsupported, ui, native, service, actions, perms, granted, runningService, runningNative, …}], errors: [{source, error}], folder, base}`.
+- `POST apps/allow {id, perms?}` — разрешить (права — подмножество запрошенных); `POST apps/revoke {id}`; `POST apps/remove {id}` — в корзину моста.
+- `POST apps/start {id, kind: service|native}`, `POST apps/stop {id, kind}`, `POST apps/touch {id}` (служба `run: "open"` гаснет через 90 с без обращений), `GET apps/log?id`.
+- `POST apps/action {id, action, params}` → `{ok, code, out}`; `GET|POST apps/store {id, key, value}` (до 1 МБ на приложение); `POST apps/import?name=<файл.most-app>` (тело — пакет).
+- `apps/svc/<id>/<путь>` — запрос к службе (служба запустится, если не запущена).
+- Файлы интерфейса: `/apps/<id>/ui/<путь>` (только с этого ПК, только после разрешения, с политикой `sandbox`), значок `/apps/<id>/icon`, SDK `/most/sdk.js`.
+
+Служба и своё окно получают переменные `MOST_API`, `MOST_TOKEN`, `MOST_APP`, `MOST_DATA`, `MOST_ROOT`, у службы ещё `MOST_PORT` (HTTP на 127.0.0.1). Вызовы с заголовком `X-Most-App: <MOST_TOKEN>`: `GET {MOST_API}/me`, `GET|POST {MOST_API}/store`, `POST {MOST_API}/notify {text}` (право `notify`), `POST {MOST_API}/toast {text}`.
+
+SDK веб-интерфейса (`window.most`): `ready()`, `on("theme"|"file", f)`, `store.get/set`, `files.pick(opts)`, `files.save(name, data)`, `service.fetch(path, init)`, `service.status()`, `service.restart()`, `notify(text)`, `toast(text)`, `window.title(t)`, `window.badge(n)`, `window.popout()`; с 3.5 — `session.*` и `activity.*` (см. «Сеансы»).
+
+Командная строка: `bridge app new <id> [папка]`, `bridge app check <папка>`, `bridge app pack <папка> [--out файл]`.
+
+## Сеансы приложений (3.5)
+
+Сеанс — это сеть одного приложения между теми, кто в одном голосовом канале. Хост — ПК, начавший сеанс (`cid 0`); остальные ходят к нему через свои мосты по подписанной связи мостов: `GET /bridge/v1/peer/net`, WebSocket. Права — `sessions` (сеансы) и `activity` (журнал). Пока ПК управляют по сети, сеансы не начинаются и не принимают входящих.
+
+**Подключение приложения** — WebSocket `ws://127.0.0.1:<порт>/bridge/v1/app/net`. Приложение предъявляет одно из трёх:
+- заголовок `X-Most-App: <MOST_TOKEN>` или `?token=` — своё окно и служба;
+- `?panel=<пропуск>` — веб-интерфейс через панель; пропуск одноразовый, на 60 с, выдаёт `POST apps/net/ticket {id}` → `{url}`;
+- токен редактора (см. ниже).
+
+Необязательный `&name=` — подпись экземпляра. Первым приходит `{"ev":"hello","conn","app","node","channel":{room,title,members}}`.
+
+Команды — текстом `{"op", "re", …}`, ответ — `{"ev":"re","re","ok":true,"v"}` или `{"ev":"re","re","ok":false,"error"}`:
+
+| op | поля | что делает |
+|---|---|---|
+| `channel` | | канал хозяина ПК |
+| `list` | | сеансы этого приложения в канале: `[{sid, app, proto, room, title, host, count, max, transport, created, meta, members, joinable}]` |
+| `joinOrCreate` | `max`, `meta`, `state`, `transport` | войти в доступный сеанс или начать свой |
+| `create` | то же | начать свой сеанс |
+| `join` | `sid` | войти в сеанс |
+| `leave` | | выйти из сеанса |
+| `presence` | `data` (до 4 КБ) | разослать своё присутствие |
+| `state` | `ops: [{op: set\|merge\|del, path: "a.b" \| ["a","b"], value}]` | изменить общее состояние: применяет хост, до 4 МБ; в `merge` поле `null` удаляет ключ; ответ — `{rev}` |
+| `connect` | `value` | только хост: строка подключения к своему серверу |
+| `kick` | `cid` | только хост: убрать участника |
+| `activity.since` | `cursor`, `limit` | журнал активности после `cursor` |
+| `activity.stats` | `period: today\|week` | итоги активности |
+| `time` | | `{now}` |
+
+При входе в сеанс приходит снимок `{sid, app, room, title, host, you, isHost, members: [{cid, node, name}], state, rev, connect, transport, ticket, max, hostNow, created, meta}`.
+
+События:
+- `member {op: join, m}` и `member {op: leave, cid, why}`;
+- `state {ops, rev, by}`;
+- `presence {cid, data}`;
+- `connect {value}`;
+- `clock {offset, rtt}` — каждые 2 с: смещение к часам хоста и задержка до него;
+- `rtt {rtt: {cid: мс}}`;
+- `ended {why}` — хост вышел, связь пропала, вас убрали, вы вышли из канала;
+- `sessions {list}`;
+- `channel {room, title}`;
+- `activity {e}`;
+- `error {error}`.
+
+**Данные** идут двоичными кадрами.
+
+Приложение → мост: `[доставка u8][кому u16 LE][ключ u8 — только для «последнего»][данные]`. Мост → приложение: `[доставка u8][от кого u16 LE][данные]`.
+
+Доставка:
+- `0` — надёжно, до 1 МБ, по порядку;
+- `1` — быстро, до 1200 Б; теряется при перегрузке;
+- `2` — последнее по ключу 0–255, до 1200 Б; устаревшее сливается.
+
+Адресаты: `0` — хост, `0xFFFF` — все, `0xFFFE` — все, кроме себя, иначе cid участника.
+
+**Свой сервер** (`transport: "external"`). Хост задаёт `connect`, а каждый участник получает свой `ticket`. Сервер на ПК хоста проверяет билет: `GET /bridge/v1/app/ticket?t=` → `{ok, who: {sid, app, cid, node, name}}` или 404.
+
+**Редактор.** Unity и другие среды подключаются так:
+1. `POST /bridge/v1/app/dev {app, who}` → `{req}`. Приложение должно лежать в «приложения» и быть разрешено. Ответа одновременно ждут не больше трёх запросов.
+2. Панель спрашивает хозяина ПК.
+3. `GET /bridge/v1/app/dev?req=` → `{state: wait|ok|no|gone, token}`.
+
+Токен действует как `MOST_TOKEN` до перезапуска моста.
+
+**Журнал активности.** Факты без содержимого, хранятся 30 дней: `bridge-data/activity/<дата>.jsonl`.
+
+События: `{seq, at, kind, …}`. Виды:
+- `voice.minute {talkSec}`;
+- `screen.minute`;
+- `chat.message`;
+- `board.edit` (не чаще раза в минуту);
+- `ping`;
+- `files.sent`;
+- `channel.join`.
+
+Для служб — `GET /bridge/v1/app/activity?since=&limit=` или `?stats=today|week` (с `X-Most-App`).
+
+Локальный API:
+- `GET apps/net` → `{channel, sessions, links, conns, dev}`;
+- `POST apps/net/channel {room, title, members}` — шлёт панель, примерно раз в 1,5 с, пока вы в канале;
+- `POST apps/net/ticket {id}`;
+- `POST apps/dev/answer {req, ok}`;
+- `GET apps/activity?since=&limit=` или `?stats=`;
+- `POST apps/activity/report {kind, …}` — от панели: минуты голоса и показа, пинги, вход в канал.
+
+SDK веб-интерфейса (`window.most`):
+- `session.joinOrCreate(opts)`, `create`, `join(sid)`, `list()`, `leave()`, `channel()`;
+- `session.send(to, data, delivery, key)`, `sendJson`;
+- `session.presence(data)`;
+- `session.state.get()`, `set(path, v)`, `merge`, `del`, `apply(ops)`;
+- `session.setConnect(v)`, `kick(cid)`, `time()`, `rtt(cid)`;
+- поля `id`, `me`, `isHost`, `members`, `connect`, `ticket`, `room`;
+- `session.on("joined"|"member"|"left"|"data"|"presence"|"state"|"connect"|"clock"|"rtt"|"ended"|"sessions"|"channel"|"error", f)`;
+- `activity.since(cursor, limit)`, `activity.stats(period)`, `activity.on(f)`.
+
+Unity — пакет `sdk/unity/com.exerussus.most` (см. его README).
+
 ## Сборки, большие файлы, план синхронизации, статус (3.3.1)
 
 - `POST upload/part?id&offset` (тело — часть файла, по порядку) — большие файлы частями; затем обычный вызов (`mailbox/upload`, `fs/upload` и др.) с `?upload=<id>&size=<байт>` и пустым телом. Часть не по порядку — `409`.
 - `GET builds` → `{history, received: [{peer, name, mode, files, bytes, at, target}], jobs, defaultRoot}`.
 - `POST builds/send {peer, path, name, mode: patch|clean}` — упаковать папку (полный путь) и отправить; идёт в фоне (`jobs`). Архив уходит ручной отправкой в `_сборки/<name>/<mode>-<время>.zip`, получатель распаковывает его сам (`clean` — прежняя папка в корзину моста).
+- (3.3.5) Заготовки: `GET builds/presets` → `{list}`, `POST builds/presets {list: [{id, name, path, peers: [..], mode, ignore: [строки]}]}` (до 50; `id` — латиница, цифры, - и _; `ignore` — шаблоны как в .gitignore, `!шаблон` возвращает исключённое, до 500 строк). `POST builds/preview {path, ignore} | {preset}` → `{files, bytes, ignoredFiles, ignoredBytes, rules: [{rule, files, bytes, example}], biggest}`. `POST builds/send {preset, mode?}` — по заготовке всем её получателям → `{started: [..], errors}`; разовая отправка принимает и `ignore`. В истории — `preset`, `skipped`.
 - `POST builds/target {peer, name, path}` — куда распаковывать сборку от соседа (пусто — `сборки/<name>`). `POST open?target=build&peer&name` — открыть папку сборки.
 - `GET mounts/plan?peer&id` → `{items: [{path, act: download|update|delete_here|upload|delete_owner|restore|conflict, size, local, remote}], total, down, up, speedDown, speedUp, etaDown, etaUp (с; -1 — неизвестно), localFiles, remoteFiles, transfers, failed}` — что сделает обмен с папкой соседа.
+- (3.3.2) Заготовки: `GET tile/status/presets` → `{list: [{id, text, color, img}], active}`, `POST tile/status/presets {list: [{id, text, color, silent?}]}` (`silent` — полная тишина, пока выбрана; видно соседям как `stSilent` в стиле плитки, на этом ПК — `silent` в `GET avatars`) (до 20; id — латиница, цифры, -), `POST tile/status/apply {id}` (пусто — без статуса; текст, цвет и значок уходят в плитку), `GET|POST tile/status/preset/image?id` (до 256 КБ), `POST tile/status/preset/image/remove?id`.
 - `POST tile/status {text?, color?}` — статус (текст до 255 знаков, цвет `#rrggbb`; пусто — убрать). `GET|POST tile/status/image[?peer]` — значок (до 256 КБ), `POST tile/status/image/remove`. Статус — в стиле плитки (`stText`, `stColor`), значок — `stImg` в `GET tile`.

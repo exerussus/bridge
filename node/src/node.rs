@@ -136,6 +136,9 @@ pub struct Node {
     once: Mutex<HashMap<String, Instant>>,
     pub mailbox: Mailbox,
     pub builds: crate::builds::Builds,
+    pub apps: crate::apps::Apps,
+    pub net: crate::net::Net,
+    pub activity: crate::activity::Activity,
     pub folders: Folders,
     pub runner: Runner,
     pub media: Media,
@@ -215,6 +218,9 @@ impl Node {
             once: Mutex::new(HashMap::new()),
             mailbox: Mailbox::new(),
             builds: Default::default(),
+            apps: Default::default(),
+            net: Default::default(),
+            activity: Default::default(),
             folders: Folders::new(&data_dir),
             runner: Runner::new(),
             media: Media::new(),
@@ -268,6 +274,8 @@ impl Node {
         crate::update::cleanup(&node);
         crate::board::schedule(&node);
         crate::mobile::schedule(&node);
+        crate::apps::schedule(&node);
+        crate::net::schedule(&node);
         tokio::spawn(crate::agent::pusher(node.clone()));
         crate::agent::schedule(&node);
         for f in node.cfg.read().folders.clone() {

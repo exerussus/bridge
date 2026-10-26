@@ -1,0 +1,13 @@
+{
+  "id": "mice",
+  "name": "Мыши",
+  "version": "1.0.0",
+  "description": "Образец сетевого приложения: курсоры всех, кто в канале, точки по щелчку и общий счёт. Сеанс — в вашем голосовом канале.",
+  "author": "Мост",
+  "ui": "ui/index.html",
+  "icon": "ui/icon.svg",
+  "window": { "w": 900, "h": 640 },
+  "net": { "proto": 1, "max": 16 },
+  "permissions": ["sessions"],
+  "bridge": "apps@1"
+}

@@ -123,6 +123,17 @@ async fn gate(State(node): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, req: 
     if path_str == format!("{}/health", p) {
         return next.run(req).await;
     }
+    // приложения: файлы интерфейсов (для изолированной рамки) и API служб по токену приложения — только с этого ПК
+    if path_str.starts_with("/apps/") || path_str.starts_with("/most/") || path_str.starts_with(&format!("{}/app/", p)) {
+        if !loopback || !host_is_local(req.headers()) {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+        // пока этим ПК управляют, службы приложений ничего не меняют
+        if path_str.starts_with(&format!("{}/app/", p)) && req.method() != axum::http::Method::GET && node.remote.active().is_some() {
+            return err(423, "мост заперт, пока этим ПК управляют по сети");
+        }
+        return next.run(req).await;
+    }
     if path_str == "/" || path_str == "/ui" || path_str == "/favicon.svg" || path_str.starts_with("/assets/") || path_str.starts_with("/app/") {
         if !loopback || !host_is_local(req.headers()) {
             return StatusCode::FORBIDDEN.into_response();
@@ -388,6 +399,7 @@ pub fn router(node: Arc<Node>) -> Router {
         .route(&format!("{}/peer/update/file", p), get(peer_update_file))
         .route(&format!("{}/peer/assistant/reply", p), post(assistant_reply))
         .merge(crate::http_local::routes())
+        .merge(crate::http_apps::routes())
         .merge(crate::mobile::routes())
         .layer(axum::extract::DefaultBodyLimit::disable())
         .layer(middleware::from_fn_with_state(node.clone(), gate))

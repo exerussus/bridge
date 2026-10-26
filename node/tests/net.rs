@@ -1728,6 +1728,261 @@ async fn builds_patch_and_clean() {
     net.stop().await;
 }
 
+/// 3.3.5: заготовки сборок и игнор — кэш не пакуется, «!» возвращает исключённое.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn build_presets_ignore() {
+    let mut net = pair();
+    net.start().await;
+    net.sync(1, &["stand", "dev"]).await;
+    let (dev, stand) = (net.n("dev").clone(), net.n("stand").clone());
+    let src = net.root.join("dev-build2");
+    for d in ["Game_Data/Managed", "Game_BurstDebugInformation_DoNotShip/x", "Cache/a/b"] { std::fs::create_dir_all(src.join(d)).unwrap(); }
+    std::fs::write(src.join("Game.exe"), b"exe").unwrap();
+    std::fs::write(src.join("Game_Data/Managed/A.dll"), b"a").unwrap();
+    std::fs::write(src.join("Game_Data/Managed/A.pdb"), b"pdb").unwrap();
+    std::fs::write(src.join("Game_Data/Managed/Keep.pdb"), b"keep").unwrap();
+    std::fs::write(src.join("Game_BurstDebugInformation_DoNotShip/x/big.bin"), vec![0u8; 5000]).unwrap();
+    std::fs::write(src.join("Cache/a/b/c.dat"), b"c").unwrap();
+    let ign = json!(["# кэш", "Cache/", "*_BurstDebugInformation_DoNotShip/", "**/*.pdb", "!Keep.pdb"]);
+    assert!(bridge_node::builds::set_presets(&dev, &json!([{ "id": "bad id", "name": "X", "path": "", "peers": [] }])).is_err());
+    let l = bridge_node::builds::set_presets(&dev, &json!([{ "id": "cora", "name": "CORA2", "path": src.to_str().unwrap(), "peers": ["STAND"], "mode": "patch", "ignore": ign }])).unwrap();
+    assert_eq!(l[0]["peers"], json!(["stand"]), "имя соседа — как в настройках");
+    let pv = bridge_node::builds::preview(&dev, src.to_str().unwrap(), &ign.as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_string()).collect::<Vec<_>>()).unwrap();
+    assert_eq!(pv["files"], 3, "войдут exe, dll и Keep.pdb: {}", pv);
+    assert_eq!(pv["ignoredFiles"], 3, "{}", pv);
+    assert_eq!(pv["rules"][0]["rule"], "*_BurstDebugInformation_DoNotShip/", "крупнейшее правило первым: {}", pv);
+    let r = bridge_node::builds::send_preset(&dev, "cora", None).unwrap();
+    assert_eq!(r["started"], json!(["stand"]));
+    for _ in 0..100 { if dev.builds.jobs.lock().is_empty() && !bridge_node::builds::status(&dev)["history"].as_array().unwrap().is_empty() { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    let h = bridge_node::builds::status(&dev)["history"][0].clone();
+    assert_eq!(h["files"], 3, "{}", h);
+    assert_eq!(h["skipped"], 3);
+    assert_eq!(h["preset"], "cora");
+    net.sync(1, &["stand"]).await;
+    let target = stand.base_dir.join("сборки").join("CORA2");
+    for _ in 0..100 { if target.join("Game.exe").exists() { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    assert!(target.join("Game_Data/Managed/Keep.pdb").exists());
+    assert!(!target.join("Game_Data/Managed/A.pdb").exists());
+    assert!(!target.join("Cache").exists() && !target.join("Game_BurstDebugInformation_DoNotShip").exists());
+    assert_eq!(bridge_node::builds::presets(&dev).len(), 1);
+    net.stop().await;
+}
+
+/// 3.4: приложения — подхват папки и пакета, согласие по отпечатку, хранилище, кнопки, упаковка.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn apps_folder_consent_actions() {
+    use bridge_node::apps;
+    let mut net = pair();
+    net.start().await;
+    let dev = net.n("dev").clone();
+    let dir = apps::folder(&dev).join("hello");
+    std::fs::create_dir_all(dir.join("ui")).unwrap();
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    std::fs::write(dir.join("ui/index.html"), "<b>hi</b>").unwrap();
+    std::fs::write(dir.join("app.json"), r#"{"id":"hello","name":"Привет","version":"1.0","ui":"ui/index.html","permissions":["notify"],"actions":[{"id":"hi","title":"Сказать","run":"bin/hi.sh {who}"}]}"#).unwrap();
+    std::fs::write(dir.join("bin/hi.sh"), "#!/bin/sh\necho \"привет, $1\"\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.join("bin/hi.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    // сломанное приложение — в ошибках, не в списке
+    std::fs::create_dir_all(apps::folder(&dev).join("bad")).unwrap();
+    std::fs::write(apps::folder(&dev).join("bad/app.json"), r#"{"id":"Bad!","name":"x"}"#).unwrap();
+    assert!(apps::scan(&dev));
+    let st = apps::status(&dev);
+    assert_eq!(st["list"].as_array().unwrap().len(), 1, "{}", st);
+    assert_eq!(st["list"][0]["state"], "new");
+    assert!(st["errors"][0]["error"].as_str().unwrap().contains("id"), "{}", st);
+    // без согласия — ни кнопок, ни интерфейса
+    assert!(apps::action(&dev, "hello", "hi", &serde_json::json!({"who":"мир"})).await.is_err());
+    apps::allow(&dev, "hello", None).unwrap();
+    let a = apps::get(&dev, "hello").unwrap();
+    assert!(apps::consent_ok(&dev, &a));
+    assert_eq!(apps::granted(&dev, &a), vec!["notify".to_string()]);
+    #[cfg(unix)]
+    {
+        let r = apps::action(&dev, "hello", "hi", &serde_json::json!({"who":"мир; rm -rf /"})).await.unwrap();
+        assert_eq!(r["out"].as_str().unwrap().trim(), "привет, мир; rm -rf /", "параметр — один аргумент, без оболочки: {}", r);
+    }
+    // правка интерфейса не требует нового согласия, правка программы — требует
+    std::fs::write(dir.join("ui/index.html"), "<b>hi 2</b>").unwrap();
+    apps::scan(&dev);
+    assert!(apps::consent_ok(&dev, &apps::get(&dev, "hello").unwrap()), "интерфейс поменялся — согласие то же");
+    std::fs::write(dir.join("bin/hi.sh"), "#!/bin/sh\necho changed\n").unwrap();
+    apps::scan(&dev);
+    assert_eq!(apps::status(&dev)["list"][0]["state"], "changed", "программа поменялась — спросить снова");
+    // хранилище
+    apps::store_set(&dev, "hello", "k", serde_json::json!({"a":1})).unwrap();
+    assert_eq!(apps::store_get(&dev, "hello", "k")["a"], 1);
+    assert!(apps::store_set(&dev, "hello", "big", serde_json::json!("x".repeat(1_100_000))).is_err());
+    // файлы интерфейса — только из ui/
+    assert!(apps::ui_file(&dev, "hello", "index.html").is_some());
+    assert!(apps::ui_file(&dev, "hello", "../bin/hi.sh").is_none());
+    // упаковка и пакет в папке
+    let src = net.root.join("pk/hello2");
+    std::fs::create_dir_all(src.join("ui")).unwrap();
+    std::fs::write(src.join("ui/index.html"), "x").unwrap();
+    std::fs::write(src.join("app.json"), r#"{"id":"hello2","name":"Пакет","version":"2.0","ui":"ui/index.html"}"#).unwrap();
+    let (pkg, n) = apps::pack(&src, None).unwrap();
+    assert_eq!(n, 2);
+    let tmp = dev.tmp_file();
+    std::fs::copy(&pkg, &tmp).unwrap();
+    apps::import(&dev, "hello2-2.0.most-app", &tmp).unwrap();
+    apps::scan(&dev);
+    let st = apps::status(&dev);
+    let p2 = st["list"].as_array().unwrap().iter().find(|x| x["id"] == "hello2").cloned().unwrap();
+    assert_eq!(p2["packaged"], true);
+    assert!(apps::ui_file(&dev, "hello2", "index.html").is_some(), "пакет распакован");
+    apps::remove(&dev, "hello2").unwrap();
+    apps::scan(&dev);
+    assert!(apps::get(&dev, "hello2").is_none());
+    assert!(dev.folders.trash_dir().join("приложения").read_dir().unwrap().count() >= 1, "убрано в корзину");
+    net.stop().await;
+}
+
+/// 3.5: сеансы приложений — два моста в одном канале: войти или создать, данные звездой через хоста,
+/// общее состояние, присутствие, «последнее по ключу», выход при уходе из канала, конец сеанса с уходом хоста.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn app_sessions_two_bridges() {
+    use bridge_node::{apps, net as anet};
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as M;
+    let mut net = pair();
+    net.start().await;
+    let (dev, stand) = (net.n("dev").clone(), net.n("stand").clone());
+    for n in [&dev, &stand] {
+        let d = apps::folder(n).join("mice");
+        std::fs::create_dir_all(d.join("ui")).unwrap();
+        std::fs::write(d.join("ui/index.html"), "x").unwrap();
+        std::fs::write(d.join("app.json"), r#"{"id":"mice","name":"Мыши","version":"1","ui":"ui/index.html","net":{"proto":1,"max":4},"permissions":["sessions","activity"]}"#).unwrap();
+        apps::scan(n);
+        apps::allow(n, "mice", None).unwrap();
+    }
+    anet::set_channel(&dev, "dev:obshiy", "Общий", vec!["stand".into()]);
+    anet::set_channel(&stand, "dev:obshiy", "Общий", vec!["dev".into()]);
+    type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+    async fn connect(n: &std::sync::Arc<bridge_node::Node>) -> Ws {
+        let t = apps::issue_token(n, "mice");
+        let url = format!("{}/bridge/v1/app/net?token={}", n.urls.read()[0].replacen("http://", "ws://", 1), t);
+        tokio_tungstenite::connect_async(url).await.unwrap().0
+    }
+    async fn op(ws: &mut Ws, v: serde_json::Value) -> serde_json::Value {
+        let re = rand::random::<u32>();
+        let mut v = v;
+        v["re"] = serde_json::json!(re);
+        ws.send(M::Text(v.to_string())).await.unwrap();
+        loop {
+            let m = tokio::time::timeout(std::time::Duration::from_secs(10), ws.next()).await.expect("ответ").unwrap().unwrap();
+            if let M::Text(t) = m {
+                let e: serde_json::Value = serde_json::from_str(&t).unwrap();
+                if e["ev"] == "re" && e["re"] == re {
+                    assert_eq!(e["ok"], true, "{}", e);
+                    return e["v"].clone();
+                }
+            }
+        }
+    }
+    /// Ждать текстовое событие (пропуская прочее) или двоичный кадр.
+    async fn wait_ev(ws: &mut Ws, ev: &str) -> serde_json::Value {
+        loop {
+            let m = tokio::time::timeout(std::time::Duration::from_secs(10), ws.next()).await.unwrap_or_else(|_| panic!("нет события {}", ev)).unwrap().unwrap();
+            if let M::Text(t) = m {
+                let e: serde_json::Value = serde_json::from_str(&t).unwrap();
+                if e["ev"] == ev {
+                    return e;
+                }
+            }
+        }
+    }
+    async fn wait_bin(ws: &mut Ws) -> Vec<u8> {
+        loop {
+            let m = tokio::time::timeout(std::time::Duration::from_secs(10), ws.next()).await.expect("кадр").unwrap().unwrap();
+            if let M::Binary(b) = m {
+                return b;
+            }
+        }
+    }
+    let mut a = connect(&dev).await;
+    let mut b = connect(&stand).await;
+    let ja = op(&mut a, serde_json::json!({ "op": "joinOrCreate" })).await;
+    assert_eq!(ja["you"], 0, "первый — хост: {}", ja);
+    assert_eq!(ja["isHost"], true);
+    // анонс доходит до соседа по каналу
+    let mut found = false;
+    for _ in 0..60 {
+        let l = op(&mut b, serde_json::json!({ "op": "list" })).await;
+        if l.as_array().map(|x| x.iter().any(|s| s["sid"] == ja["sid"] && s["joinable"] == true)).unwrap_or(false) {
+            found = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(found, "сеанс хоста виден соседу в том же канале");
+    let jb = op(&mut b, serde_json::json!({ "op": "joinOrCreate" })).await;
+    assert_eq!(jb["sid"], ja["sid"], "вошёл в идущий сеанс, а не создал свой");
+    assert_eq!(jb["you"], 1);
+    assert_eq!(jb["members"].as_array().unwrap().len(), 2);
+    let mj = wait_ev(&mut a, "member").await;
+    assert_eq!(mj["op"], "join");
+    // данные: клиент → хосту (надёжно)
+    let mut f = vec![0u8, 0, 0];
+    f.extend_from_slice(b"hi");
+    b.send(M::Binary(f)).await.unwrap();
+    let got = wait_bin(&mut a).await;
+    assert_eq!(got, vec![0, 1, 0, b'h', b'i'], "хост получил [надёжно][от 1]hi");
+    // хост → всем кроме себя (быстро)
+    a.send(M::Binary(vec![1, 0xFE, 0xFF, 7, 7])).await.unwrap();
+    assert_eq!(wait_bin(&mut b).await, vec![1, 0, 0, 7, 7]);
+    // последнее по ключу: при заторе доходит хотя бы последнее
+    for i in 0..50u8 {
+        a.send(M::Binary(vec![2, 1, 0, 9, i])).await.unwrap();
+    }
+    let mut last = 0;
+    loop {
+        let fr = wait_bin(&mut b).await;
+        assert_eq!(&fr[..3], &[2, 0, 0]);
+        last = fr[3];
+        if last == 49 {
+            break;
+        }
+    }
+    assert_eq!(last, 49);
+    // общее состояние: клиент пишет — все видят
+    op(&mut b, serde_json::json!({ "op": "state", "ops": [{ "op": "set", "path": "score.urban", "value": 3 }] })).await;
+    let st = wait_ev(&mut a, "state").await;
+    assert_eq!(st["ops"][0]["value"], 3);
+    assert_eq!(st["by"], 1);
+    // присутствие
+    op(&mut a, serde_json::json!({ "op": "presence", "data": { "x": 0.5, "y": 0.25 } })).await;
+    let pr = wait_ev(&mut b, "presence").await;
+    assert_eq!(pr["cid"], 0);
+    assert_eq!(pr["data"]["x"], 0.5);
+    // часы и задержки
+    let ck = wait_ev(&mut b, "clock").await;
+    assert!(ck["rtt"].as_u64().is_some());
+    // активность — живьём тем, у кого право
+    bridge_node::activity::record(&stand, "voice.minute", serde_json::json!({ "talkSec": 12, "people": 2 }));
+    let act = wait_ev(&mut b, "activity").await;
+    assert_eq!(act["e"]["kind"], "voice.minute");
+    let since = op(&mut b, serde_json::json!({ "op": "activity.since", "cursor": 0 })).await;
+    assert!(since["events"].as_array().unwrap().iter().any(|e| e["talkSec"] == 12));
+    // ушёл из канала — вышел из сеанса
+    anet::set_channel(&stand, "", "", vec![]);
+    let ml = wait_ev(&mut a, "member").await;
+    assert_eq!(ml["op"], "leave");
+    // войти снова и проверить конец сеанса при уходе хоста
+    anet::set_channel(&stand, "dev:obshiy", "Общий", vec!["dev".into()]);
+    tokio::time::sleep(std::time::Duration::from_millis(3500)).await;
+    let jb2 = op(&mut b, serde_json::json!({ "op": "join", "sid": ja["sid"] })).await;
+    assert_eq!(jb2["sid"], ja["sid"]);
+    assert_eq!(jb2["state"]["score"]["urban"], 3, "новичок получил общее состояние");
+    a.close(None).await.unwrap();
+    let end = wait_ev(&mut b, "ended").await;
+    assert!(end["why"].as_str().unwrap().contains("хост"), "{}", end);
+    net.stop().await;
+}
+
 /// 3.3.1: план синхронизации папки соседа — что скачается, что уйдёт хозяину, объём.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shared_folder_plan() {
@@ -1749,5 +2004,45 @@ async fn shared_folder_plan() {
     let p = stand.folders.plan(&stand, "dev", "obshee").await.unwrap();
     assert_eq!(p["total"], 0, "после обмена — пусто: {}", p);
     assert_eq!(stand.folders.plan(&stand, "dev", "нет").await.err().unwrap().0, 404);
+    net.stop().await;
+}
+
+/// 3.3.2: заготовки статуса — выбранная уходит соседу (текст, цвет, значок); «без статуса» всё убирает; стиль плитки статус не трогает.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tile_status_presets() {
+    let mut net = pair();
+    net.start().await;
+    net.sync(1, &["stand", "dev"]).await;
+    let (dev, stand) = (net.n("dev").clone(), net.n("stand").clone());
+    use bridge_node::tile;
+    tile::set_presets(&dev, &json!({ "list": [{ "id": "s1", "text": "на созвоне", "color": "#ff4f64" }, { "id": "s2", "text": "собираю билд", "color": "" }] })).unwrap();
+    let gif = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;".to_vec();
+    tile::set_preset_img(&dev, "s2", &gif).unwrap();
+    assert!(tile::set_presets(&dev, &json!({ "list": [{ "id": "../x", "text": "a", "color": "" }] })).is_err());
+    let r = tile::apply_preset(&dev, "s2").unwrap();
+    assert_eq!(r["active"], "s2");
+    tile::set_style(&dev, &json!({ "mask": "top" })).unwrap();
+    net.sync(1, &["stand", "dev"]).await;
+    let t = tile::of_peer(&stand, "dev").await.expect("плитка");
+    assert_eq!(t["style"]["stText"], "собираю билд");
+    assert_eq!(tile::st_img_of_peer(&stand, "dev").await.unwrap(), gif, "значок заготовки у соседа");
+    // правка выбранной заготовки — сразу в статусе
+    tile::set_presets(&dev, &json!({ "list": [{ "id": "s1", "text": "на созвоне", "color": "#ff4f64" }, { "id": "s2", "text": "собираю билд CORA", "color": "" }] })).unwrap();
+    assert_eq!(tile::own_style(&dev)["stText"], "собираю билд CORA");
+    tile::apply_preset(&dev, "s1").unwrap();
+    assert_eq!((tile::own_style(&dev)["stColor"].as_str(), tile::own_st_img(&dev).is_none()), (Some("#FF4F64"), true));
+    // тишина
+    tile::set_presets(&dev, &json!({ "list": [{ "id": "s1", "text": "на созвоне", "color": "#ff4f64", "silent": true }, { "id": "s2", "text": "собираю билд CORA", "color": "" }] })).unwrap();
+    assert!(tile::silent(&dev), "выбрана s1 с тишиной");
+    net.sync(1, &["stand", "dev"]).await;
+    assert_eq!(tile::of_peer(&stand, "dev").await.unwrap()["style"]["stSilent"], true, "сосед знает про тишину");
+    tile::set_style(&dev, &json!({ "mask": "bottom" })).unwrap();
+    assert!(tile::silent(&dev), "стиль плитки тишину не снимает");
+    tile::apply_preset(&dev, "s2").unwrap();
+    assert!(!tile::silent(&dev));
+    tile::apply_preset(&dev, "").unwrap();
+    assert!(tile::own_style(&dev).get("stText").is_none() && tile::own_st_img(&dev).is_none());
+    assert_eq!(tile::presets(&dev)["active"], "");
+    assert!(tile::apply_preset(&dev, "нет").is_err());
     net.stop().await;
 }
