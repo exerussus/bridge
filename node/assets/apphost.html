@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Приложение — Мост</title>
+<style>
+html,body{margin:0;height:100%;background:#0B0C1A;color:#E8EAFB;font:14px system-ui,sans-serif;overflow:hidden}
+iframe{position:fixed;inset:0;width:100%;height:100%;border:0;background:#0B0C1A}
+#gone{position:fixed;inset:0;display:none;align-items:center;justify-content:center;text-align:center;padding:24px;color:#A3A7CC}
+body.gone #gone{display:flex}body.gone iframe{display:none}
+</style>
+</head>
+<body>
+<iframe id="f" title="Приложение"></iframe>
+<div id="gone">Панель моста закрыта или приложение убрано — закройте это окно.</div>
+<script>
+// Отдельное окно приложения: рамка с интерфейсом, все вызовы — через панель, открывшую окно (там проверяются права).
+const P = new URLSearchParams(location.search), id = P.get('id') || '';
+const f = document.getElementById('f');
+const host = () => { try { return opener && opener.__apps; } catch { return null; } };
+const h0 = host();
+if (!h0 || !id) document.body.classList.add('gone');
+else {
+  const info = h0.info(id);
+  if (!info) document.body.classList.add('gone');
+  else {
+    document.title = info.name + ' — Мост';
+    f.setAttribute('sandbox', info.sandbox);
+    f.setAttribute('allow', info.allow);
+    f.src = info.src;
+    h0.attach(id, window);
+  }
+}
+addEventListener('message', e => {
+  if (e.source !== f.contentWindow) return;
+  const d = e.data; if (!d || d.most !== 1 || !d.id) return;
+  const h = host(); if (!h) { document.body.classList.add('gone'); return; }
+  h.call(id, d.m, d.a || [], window).then(v => f.contentWindow.postMessage({ most: 1, re: d.id, v }, '*'), err => f.contentWindow.postMessage({ most: 1, re: d.id, err: String(err && err.message || err) }, '*'));
+});
+// события от панели (тема, перезагрузка)
+window.__appEvent = (ev, v) => { if (ev === 'reload') { f.src = f.src; return; } try { f.contentWindow.postMessage({ most: 1, ev, v }, '*'); } catch {} };
+window.__setTitle = t => { document.title = t + ' — Мост'; };
+addEventListener('beforeunload', () => { const h = host(); if (h) h.detach(id, window); });
+</script>
+</body>
+</html>

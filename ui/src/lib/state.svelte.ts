@@ -2,11 +2,11 @@
 import type { Component } from 'svelte';
 import { api, app } from './api';
 
-export const TABS = ['home', 'peers', 'send', 'folders', 'shares', 'records', 'voice', 'chat', 'agent', 'assistant', 'phone', 'settings', 'access', 'log', 'help'] as const;
+export const TABS = ['home', 'peers', 'send', 'folders', 'shares', 'records', 'voice', 'apps', 'chat', 'agent', 'assistant', 'phone', 'settings', 'access', 'log', 'help'] as const;
 export type Tab = (typeof TABS)[number];
 
 export const TONE: Record<string, string> = {
-  home: 'cyan', peers: 'cyan', send: 'green', folders: 'green', shares: 'green', records: 'amber', voice: 'red', chat: 'red', agent: 'amber',
+  home: 'cyan', peers: 'cyan', send: 'green', folders: 'green', shares: 'green', records: 'amber', voice: 'red', apps: 'amber', chat: 'red', agent: 'amber',
   assistant: 'cyan', phone: 'cyan', settings: 'dim', access: 'amber', log: 'dim', help: 'dim',
 };
 export const HEAD: Record<string, [string, string]> = {
@@ -17,6 +17,7 @@ export const HEAD: Record<string, [string, string]> = {
   shares: ['Пространства', 'Рабочие папки проектов с записями и правилами приёма.'],
   records: ['Записи', 'Задачи, обсуждения и команды между ПК.'],
   voice: ['Каналы', 'Голос и показ экрана. Зашли в канал — вы в разговоре.'],
+  apps: ['Приложения', 'Свои приложения этого ПК: открываются вкладками и отдельными окнами.'],
   agent: ['Агенты', 'Claude на одном ПК поручает задачи Claude на другом — и получает отчёт.'],
   chat: ['Чаты', 'Переписка с соседями и в каналах. Сообщения хранятся сутки.'],
   assistant: ['Ассистент', 'Чат с ассистентом семьи: текст, голос, файлы. Напоминания — уведомлением.'],

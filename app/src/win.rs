@@ -346,7 +346,8 @@ pub fn balloon(title: &str, text: &str, tab: &str) {
             n.uFlags = NIF_INFO;
             fill(&mut n.szInfoTitle, title);
             fill(&mut n.szInfo, text);
-            n.dwInfoFlags = NIIF_INFO;
+            // статус «полная тишина» — уведомление без звука
+            n.dwInfoFlags = NIIF_INFO | if bridge_node::tile::silent(&app.node) { NIIF_NOSOUND } else { 0 };
             Shell_NotifyIconW(NIM_MODIFY, &n);
         }
     });

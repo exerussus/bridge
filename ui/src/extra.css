@@ -230,3 +230,28 @@ body.bdfull .modal{z-index:70}
 .fstabs button{background:none;border:0;border-bottom:2px solid transparent;color:var(--muted);padding:6px 12px;cursor:pointer;font:inherit;font-size:13px}
 .fstabs button.on{color:var(--text);border-bottom-color:var(--cyan)}
 .fsplan{margin-top:8px}
+/* 3.3.2 — заготовки статуса и меню по правой кнопке */
+.stpre{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:10px;border:1px solid transparent;margin-bottom:4px;flex-wrap:wrap}
+.stpre.on{border-color:rgba(56,225,240,.45);background:rgba(56,225,240,.06)}
+.stpre input{min-width:180px}
+.stpre .stcolors{display:flex;gap:4px}
+.stpre .stsw{width:18px;height:18px}
+.stmenu{position:fixed;z-index:70;min-width:220px;max-width:340px;background:var(--solid);border:1px solid var(--line2);border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.5);padding:6px;display:flex;flex-direction:column;animation:popin .12s ease-out}
+.stmenu .stmh{font:700 10.5px/1.4 var(--display);letter-spacing:.14em;text-transform:uppercase;color:var(--muted);padding:4px 8px 6px}
+.stmenu button{display:flex;align-items:center;gap:9px;background:none;border:0;border-radius:8px;color:var(--text);padding:6px 8px;font:inherit;font-size:13px;text-align:left;cursor:pointer}
+.stmenu button:hover{background:rgba(160,170,255,.1)}
+.stmenu button.on{background:rgba(56,225,240,.12);color:var(--cyan)}
+.stmenu .sticon{width:18px;height:18px}
+.stmenu .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stmenu .stmsep{height:1px;background:var(--line);margin:4px 2px}
+.stmenu .stmn{font-size:12px;color:var(--muted);padding:4px 8px}
+.sticon.nost{border:1px dashed var(--line2);box-sizing:border-box}
+.stsilent{display:flex;align-items:center;gap:4px;font-size:12px;white-space:nowrap;cursor:pointer}
+.tile b .stsil{margin-left:5px;font-size:.85em}
+.stmenu .stmsil{margin-left:auto;font-size:12px}
+
+/* приложения: значок (рабочий стол, окно разрешения) */
+.appic{position:relative;width:64px;height:64px;border-radius:18px;display:flex;align-items:center;justify-content:center;background:hsl(var(--h,190) 70% 60% / .14);border:1px solid hsl(var(--h,190) 70% 60% / .4);color:hsl(var(--h,190) 75% 70%);font-weight:700;font-size:20px;flex:0 0 auto}
+.appic img{width:100%;height:100%;object-fit:cover;border-radius:17px}
+.appic.big{width:56px;height:56px}
+.appic.sm{width:30px;height:30px;border-radius:9px;font-size:12px}.appic.sm img{border-radius:8px}

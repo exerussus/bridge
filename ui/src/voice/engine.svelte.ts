@@ -7,7 +7,8 @@
 // Движок — обычные объекты (соединения, потоки), а интерфейсу о переменах говорит счётчик V.v.
 import { api, onMedia } from '../lib/api';
 import { ui, toast, setTab, SET, titleOf, me as ME, badgeCount } from '../lib/state.svelte';
-import { sfx, sfxDiff, ring, playFile, pingSound, playPing, PING_KINDS, setSink } from '../lib/audio';
+import { TILES } from '../lib/tile.svelte';
+import { sfx, sfxDiff, ring, playFile, pingSound, playPing, PING_KINDS, setSink, setSilent } from '../lib/audio';
 import { notifyTo } from '../lib/notify';
 import { CHT } from '../lib/chat.svelte';
 
@@ -22,7 +23,7 @@ export const GREET = $state<Record<string, boolean>>({});
 /** Вид комнаты: вкладка (участники, показы, доска) и подвкладка показов. */
 export const VV = $state({ view: 'people', sub: 'list', chatPinned: false });
 /** Аватарки и свои звуки (свои и соседей): хэши файлов. */
-export const AV = $state<{ me: string; peers: Record<string, string>; sound: string; sounds: Record<string, string>; ping: string; pings: Record<string, string>; tile: string; tiles: Record<string, string>; raw?: string }>({ me: '', peers: {}, sound: '', sounds: {}, ping: '', pings: {}, tile: '', tiles: {} });
+export const AV = $state<{ me: string; peers: Record<string, string>; sound: string; sounds: Record<string, string>; ping: string; pings: Record<string, string>; tile: string; tiles: Record<string, string>; raw?: string; silent?: boolean; status?: any }>({ me: '', peers: {}, sound: '', sounds: {}, ping: '', pings: {}, tile: '', tiles: {} });
 /** Входящие звонки и просьбы показать экран — плашки над каналами. */
 export const INV = $state<{ id: string; media: string; text: string; from: string; ts: number; accept: () => void; decline: () => void }[]>([]);
 
@@ -56,6 +57,11 @@ export function myState() {
     watching: [...R.watching].filter((id: string) => live.has(id)), title: R.title,
     // вошёл тихо: остальные не играют звук входа (флаг живёт первые секунды)
     qj: R.quiet && Date.now() - (R.joinedAt || 0) < 20000 ? 1 : undefined,
+    // (3.3.4) клиент сам говорит, что он только что вошёл (fr: 1) или уже сидит в канале (fr: 0): если после обрыва
+    // связи он появился снова с fr: 0 — у остальных не приветствие, а сигнал «связь восстановлена»
+    fr: Date.now() - (R.joinedAt || 0) < 20000 ? 1 : 0,
+    // (3.3.4) статус — сразу всем в канале, не дожидаясь обмена с соседями
+    sts: AV.status || null,
   };
 }
 export const onlinePeers = () => (ui.ov ? ui.ov.peers : []).filter((p: any) => p.enabled && !p.invite && !p.pending);
@@ -104,7 +110,10 @@ export async function loadAvatars() {
     const r = await api('GET', 'avatars');
     const raw = JSON.stringify(r);
     if (raw === AV.raw) return;
-    Object.assign(AV, { raw, me: r.me || '', peers: r.peers || {}, sound: r.sound || '', sounds: r.sounds || {}, ping: r.ping || '', pings: r.pings || {}, tile: r.tile || '', tiles: r.tiles || {} });
+    setSilent(!!r.silent);
+    const stChanged = JSON.stringify(AV.status || null) !== JSON.stringify(r.status || null);
+    Object.assign(AV, { raw, silent: !!r.silent, status: r.status || null, me: r.me || '', peers: r.peers || {}, sound: r.sound || '', sounds: r.sounds || {}, ping: r.ping || '', pings: r.pings || {}, tile: r.tile || '', tiles: r.tiles || {} });
+    if (stChanged && R.key) broadcastState(); // свой статус — в канал сразу
   } catch {}
 }
 setInterval(loadAvatars, 30000);
@@ -146,10 +155,20 @@ function pingAck(n: string) {
 }
 export function pingFlash(n: string) { PINGED[n] = (PINGED[n] || 0) + 1; }
 const PINGT: Record<string, number> = {};
+/** Статус участника: из состояния канала (сразу), иначе из его плитки. null — без статуса. */
+export function statusOf(n: string): any {
+  if (n === ME()) return AV.status || null;
+  for (const box of Object.values(ROSTER)) { const e = (box as any)[n]; if (e && e.st && 'sts' in e.st && Date.now() - e.t < 16000) return e.st.sts; }
+  const tl = TILES[n];
+  return tl && tl.style && (tl.style.stText || tl.style.stColor || tl.stImg || tl.style.stSilent) ? { text: tl.style.stText || '', color: tl.style.stColor || '', silent: !!tl.style.stSilent, img: tl.stImg || '' } : null;
+}
 export function ping(n: string) {
   if (Date.now() - (PINGT[n] || 0) < 1200) return;
+  // у него «полная тишина» — пинг не прозвучит, не шлём
+  if (statusOf(n)?.silent) { toast('У ' + titleOf(n) + ' полная тишина — пинг не прозвучит', 'warn'); return; }
   PINGT[n] = Date.now();
   pingAck(n); pingFlash(n);
+  activity('ping', { to: n });
   rsend(n, { type: 'ping' }).catch(e => toast(e.message, 'bad'));
 }
 
@@ -475,23 +494,28 @@ const msgHooks: ((m: any, n: string, k: string) => boolean)[] = [];
 export function onRoomMsg(f: (m: any, n: string, k: string) => boolean) { msgHooks.push(f); }
 
 const RECVQ: Record<string, Promise<any>> = {};
+let RECONT = 0;
 function onRoomQueued(m: any) { const n = m.from || ''; RECVQ[n] = (RECVQ[n] || Promise.resolve()).then(() => onRoom(m)).catch(e => console.warn('room', e)); }
 async function onRoom(m: any) {
   const k = m.room, n = m.from;
   if (m.type === 'state') {
     const box = (ROSTER[k] = ROSTER[k] || {});
     const isNew = !box[n] || Date.now() - box[n].t > 16000;
+    // не входил заново, просто пропадала связь — так говорит сам клиент
+    const reconn = isNew && !!m.st && m.st.fr === 0;
     const prev = box[n] && !isNew ? box[n].st : null;
     // участник сменил устройство (ПК ↔ телефон) — прежнее соединение больше не годится
     if (box[n] && box[n].st && box[n].st.sid && m.st && m.st.sid && box[n].st.sid !== m.st.sid) closeLink(n);
     box[n] = { st: m.st || {}, t: Date.now() };
     if (k === R.key && !R.deaf) {
-      const d = isNew ? 'join' : sfxDiff(prev, m.st);
+      const d = reconn ? 'reconnect' : isNew ? 'join' : sfxDiff(prev, m.st);
+      // сами только что вошли — все уже сидящие «новые», звуков нет
+      if (d === 'reconnect') { if (Date.now() - (R.joinedAt || 0) > 4000 && Date.now() - RECONT > 1500) { RECONT = Date.now(); sfx('reconnect'); } } else
       // свой звук входа — только у тех, кто вошёл после нас (иначе при нашем входе заиграли бы все сразу)
       if (d === 'join' && m.st && m.st.qj) {} // вошёл тихо
       else if (d === 'join' && Date.now() - (R.joinedAt || 0) > 4000 && playJoinSound(n)) {} else if (d) sfx(d);
     }
-    if (k === R.key) { if (!R.members.includes(n)) R.members.push(n); syncLink(n); if (isNew) toast(titleOf(n) + ' зашёл в «' + R.title + '»'); }
+    if (k === R.key) { if (!R.members.includes(n)) R.members.push(n); syncLink(n); if (reconn) { if (Date.now() - (R.joinedAt || 0) > 4000) toast('Связь с ' + titleOf(n) + ' восстановилась'); } else if (isNew) { toast(titleOf(n) + ' зашёл в «' + R.title + '»'); activity('channel.join', { room: k, who: n }); } }
     else if (isNew && !R.key && roomDef(k)) toast(titleOf(n) + ' в канале «' + roomDef(k).title + '» — вкладка «Каналы»');
     bump();
     return;
@@ -677,3 +701,25 @@ export function voiceStart() {
     }
   });
 }
+
+// ── приложения (3.5): мост знает, в каком канале этот ПК и кто в нём сейчас (для сеансов приложений),
+// и пишет журнал активности: минуты в канале и разговора, показ экрана, пинги, входы соседей ──
+export function activity(kind: string, d: Record<string, any> = {}) { api('POST', 'apps/activity/report', { kind, ...d }).catch(() => {}); }
+let chanSig = '';
+function reportChannel() {
+  const members = R.key ? rosterOf(R.key).map(p => p.name).filter(n => n !== ME()) : [];
+  const sig = (R.key || '') + '|' + members.join(',');
+  if (sig === chanSig) return;
+  chanSig = sig;
+  api('POST', 'apps/net/channel', { room: R.key || '', title: R.title || '', members }).catch(() => { chanSig = ''; });
+}
+setInterval(reportChannel, 1500);
+setInterval(() => { chanSig = ''; }, 20000); // мост мог перезапуститься — напомнить
+let talkMs = 0;
+setInterval(() => { if (R.key && SPK.__me) talkMs += 120; }, 120);
+setInterval(() => {
+  if (!R.key) { talkMs = 0; return; }
+  activity('voice.minute', { room: R.key, title: R.title, people: rosterOf(R.key).length, talkSec: Math.min(60, Math.round(talkMs / 1000)) });
+  talkMs = 0;
+  if (Object.keys(R.mine).length) activity('screen.minute', { room: R.key });
+}, 60000);

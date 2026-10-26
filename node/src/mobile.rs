@@ -288,7 +288,7 @@ fn is_https(h: &HeaderMap) -> bool {
 pub fn allowed(rights: &str, method: &Method, rest: &str) -> bool {
     let rest = rest.trim_matches('/');
     const NEVER: &[&str] = &["secret", "open", "ui", "ui/claim", "ui/result"];
-    if NEVER.contains(&rest) || rest.starts_with("control") || rest.starts_with("devices") || rest.starts_with("mobile") {
+    if NEVER.contains(&rest) || rest.starts_with("control") || rest.starts_with("devices") || rest.starts_with("mobile") || rest.starts_with("apps") {
         return false;
     }
     if rights == "full" {

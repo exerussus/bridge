@@ -28,8 +28,17 @@ export function setSink(a: HTMLMediaElement) {
   if (SET.out && (a as any).setSinkId) (a as any).setSinkId(SET.out).catch(() => {});
 }
 
+// (3.3.3) Полная тишина (статус с флажком «тишина»): приложение не издаёт ни звука — ни пингов, ни входов, ни звонков.
+let SILENT = false;
+export const isSilent = () => SILENT;
+export function setSilent(on: boolean) {
+  SILENT = on;
+  if (on) { ring(false); if (fileA) { fileA.pause(); fileA = null; } }
+}
+
 /** Сыграть синтезированный звук: в контексте, а если он «спит» (не было щелчка) — через <audio>. */
 function play(build: (c: BaseAudioContext, out: AudioNode, t: number) => number) {
+  if (SILENT) return;
   const c = actx();
   if (c && c.state === 'running') { build(c, c.destination, c.currentTime + 0.01); return; }
   // запасной путь: отрендерить в WAV и сыграть элементом <audio> (его разрешает --autoplay-policy окна)
@@ -62,6 +71,8 @@ const SOUNDS: Record<string, [number, number, number][]> = {
   join: [[587, 0, 0.16], [880, 0.1, 0.26]], leave: [[880, 0, 0.16], [587, 0.1, 0.26]],
   mute: [[520, 0, 0.07], [390, 0.065, 0.12]], unmute: [[390, 0, 0.07], [520, 0.065, 0.12]],
   deaf: [[330, 0, 0.09], [220, 0.085, 0.2]], undeaf: [[220, 0, 0.09], [330, 0.085, 0.2]],
+  // связь с участником восстановилась (он не выходил из канала) — не приветствие
+  reconnect: [[784, 0, 0.06], [988, 0.07, 0.06], [784, 0.14, 0.06], [1175, 0.21, 0.18]],
   share: [[660, 0, 0.07], [990, 0.055, 0.07], [1320, 0.11, 0.16]], unshare: [[1320, 0, 0.07], [990, 0.055, 0.07], [660, 0.11, 0.14]],
 };
 
@@ -123,6 +134,7 @@ let fileA: HTMLAudioElement | null = null;
 /** Короткий звук из файла моста (свой пинг, звук входа): не дольше max секунд. */
 /** Сыграть файл моста (до max секунд). Возвращает элемент звука (null — не вышло). */
 export function playFile(path: string, vol: number, max: number, onFail?: () => void): HTMLAudioElement | null {
+  if (SILENT) return null;
   try {
     if (fileA) fileA.pause();
     const a = (fileA = new Audio(aurl(path)));
@@ -145,6 +157,7 @@ let ringStop: (() => void) | null = null;
 /** Сигнал вызова (пара тонов несколько раз). */
 export function ring(on: boolean) {
   if (!on) { ringStop && ringStop(); ringStop = null; return; }
+  if (SILENT) return;
   if (ringStop) return;
   let alive = true;
   ringStop = () => { alive = false; };

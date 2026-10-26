@@ -62,6 +62,9 @@ pub fn clean(v: &Value) -> Result<Value, String> {
             out.insert(k.into(), json!(f.clamp(lo, hi).round()));
         }
     }
+    if o.get("stSilent").and_then(|x| x.as_bool()).unwrap_or(false) {
+        out.insert("stSilent".into(), json!(true));
+    }
     if let Some(x) = o.get("stText") {
         let t = clean_status_text(x.as_str().ok_or("stText — строка")?);
         if !t.is_empty() {
@@ -115,7 +118,7 @@ pub fn set_style(node: &Arc<Node>, v: &Value) -> Result<Value, String> {
     let mut st = clean(v)?;
     // статус меняется отдельно: стиль без него статус не стирает
     let old = own_style(node);
-    for k in ["stText", "stColor"] {
+    for k in ["stText", "stColor", "stSilent"] {
         if v.get(k).is_none() {
             if let Some(x) = old.get(k) {
                 st[k] = x.clone();
@@ -154,6 +157,13 @@ pub fn set_status(node: &Arc<Node>, v: &Value) -> Result<Value, String> {
             m.insert("stText".into(), json!(t));
         }
     }
+    if let Some(b) = v.get("silent") {
+        if b.as_bool().unwrap_or(false) {
+            m.insert("stSilent".into(), json!(true));
+        } else {
+            m.remove("stSilent");
+        }
+    }
     if let Some(c) = v.get("color") {
         match color(c).ok_or("color: цвет #rrggbb")? {
             c if c.is_empty() => {
@@ -166,7 +176,7 @@ pub fn set_status(node: &Arc<Node>, v: &Value) -> Result<Value, String> {
     }
     std::fs::write(style_file(node), st.to_string()).map_err(|e| e.to_string())?;
     node.notify_all("avatar");
-    Ok(json!({ "text": st["stText"], "color": st["stColor"], "img": st_hash(node) }))
+    Ok(json!({ "text": st["stText"], "color": st["stColor"], "silent": st["stSilent"], "img": st_hash(node) }))
 }
 
 pub fn set_st_img(node: &Arc<Node>, b: &[u8]) -> Result<String, String> {
@@ -179,6 +189,140 @@ pub fn set_st_img(node: &Arc<Node>, b: &[u8]) -> Result<String, String> {
     std::fs::write(st_file(node), b).map_err(|e| e.to_string())?;
     node.notify_all("avatar");
     Ok(crate::avatar::hash_of(b))
+}
+
+// ───────────── заготовки статуса (3.3.2) ─────────────
+// Статусы заготавливаются в настройках ({id, text, color} + картинка-значок), а выбираются правой кнопкой на своей плитке.
+// Заготовки живут только на этом ПК; соседям уходит выбранный статус — как раньше (текст, цвет, значок в плитке).
+
+fn presets_file(node: &Node) -> PathBuf {
+    node.data_dir.join("status-presets.json")
+}
+fn preset_img_file(node: &Node, id: &str) -> Option<PathBuf> {
+    (!id.is_empty() && id.len() <= 40 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')).then(|| node.data_dir.join("status-img").join(format!("{}.img", id)))
+}
+
+/// Заготовки: [{id, text, color, img (отпечаток картинки, пусто — нет)}] и какая выбрана сейчас (`active`, пусто — без статуса).
+pub fn presets(node: &Node) -> Value {
+    let v: Value = std::fs::read_to_string(presets_file(node)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({ "list": [], "active": "" }));
+    let list: Vec<Value> = v["list"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mut p| {
+            let id = p["id"].as_str().unwrap_or("").to_string();
+            p["img"] = json!(preset_img_file(node, &id).and_then(|f| std::fs::read(f).ok()).map(|b| crate::avatar::hash_of(&b)).unwrap_or_default());
+            p
+        })
+        .collect();
+    // выбранная — только если статус плитки всё ещё её (могли поменять через API)
+    let st = own_style(node);
+    let active = v["active"].as_str().unwrap_or("").to_string();
+    let still = list.iter().any(|p| p["id"] == active.as_str() && st.get("stText").and_then(|x| x.as_str()).unwrap_or("") == p["text"].as_str().unwrap_or(""));
+    json!({ "list": list, "active": if still { active } else { String::new() } })
+}
+
+/// Сохранить заготовки (до 20): текст до 255 знаков, цвет #rrggbb. Картинки — отдельно (set_preset_img).
+pub fn set_presets(node: &Arc<Node>, v: &Value) -> Result<Value, String> {
+    let arr = v["list"].as_array().ok_or("list — массив заготовок")?;
+    if arr.len() > 20 {
+        return Err("заготовок — до 20".into());
+    }
+    let mut out = Vec::new();
+    for p in arr {
+        let id = p["id"].as_str().unwrap_or("").to_string();
+        if preset_img_file(node, &id).is_none() {
+            return Err("id заготовки: латиница, цифры и -".into());
+        }
+        let text = clean_status_text(p["text"].as_str().unwrap_or(""));
+        let c = color(&p["color"]).ok_or("color: цвет #rrggbb")?;
+        out.push(json!({ "id": id, "text": text, "color": c, "silent": p["silent"].as_bool().unwrap_or(false) }));
+    }
+    // убранные — без их картинок
+    let keep: Vec<String> = out.iter().map(|p| p["id"].as_str().unwrap_or("").to_string()).collect();
+    if let Ok(rd) = std::fs::read_dir(node.data_dir.join("status-img")) {
+        for e in rd.flatten() {
+            let n = e.file_name().to_string_lossy().trim_end_matches(".img").to_string();
+            if !keep.contains(&n) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    let old: Value = std::fs::read_to_string(presets_file(node)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+    let active = old["active"].as_str().unwrap_or("").to_string();
+    let active = if keep.contains(&active) { active } else { String::new() };
+    std::fs::write(presets_file(node), json!({ "list": out, "active": active }).to_string()).map_err(|e| e.to_string())?;
+    // выбранную поправили — обновить и статус плитки
+    if !active.is_empty() {
+        apply_preset(node, &active)?;
+    }
+    Ok(presets(node))
+}
+
+pub fn set_preset_img(node: &Arc<Node>, id: &str, b: &[u8]) -> Result<String, String> {
+    let f = preset_img_file(node, id).ok_or("id заготовки")?;
+    if b.len() > ST_MAX {
+        return Err("значок статуса больше 256 КБ".into());
+    }
+    if crate::avatar::mime_of(b).is_none() {
+        return Err("нужна картинка: JPEG, PNG, WebP или GIF".into());
+    }
+    let _ = std::fs::create_dir_all(f.parent().unwrap());
+    std::fs::write(&f, b).map_err(|e| e.to_string())?;
+    if presets(node)["active"] == id {
+        apply_preset(node, id)?;
+    }
+    Ok(crate::avatar::hash_of(b))
+}
+
+pub fn remove_preset_img(node: &Arc<Node>, id: &str) -> Result<(), String> {
+    let f = preset_img_file(node, id).ok_or("id заготовки")?;
+    let _ = std::fs::remove_file(f);
+    if presets(node)["active"] == id {
+        apply_preset(node, id)?;
+    }
+    Ok(())
+}
+
+pub fn preset_img(node: &Node, id: &str) -> Option<Vec<u8>> {
+    std::fs::read(preset_img_file(node, id)?).ok()
+}
+
+/// Выбрать заготовку (пусто — без статуса): текст, цвет и значок уходят в плитку — соседи увидят.
+pub fn apply_preset(node: &Arc<Node>, id: &str) -> Result<Value, String> {
+    let f = presets_file(node);
+    let mut v: Value = std::fs::read_to_string(&f).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({ "list": [], "active": "" }));
+    if id.is_empty() {
+        set_status(node, &json!({ "text": "", "color": "", "silent": false }))?;
+        let _ = std::fs::remove_file(st_file(node));
+        v["active"] = json!("");
+    } else {
+        let p = v["list"].as_array().and_then(|a| a.iter().find(|p| p["id"] == id).cloned()).ok_or("нет такой заготовки")?;
+        set_status(node, &json!({ "text": p["text"], "color": p["color"], "silent": p["silent"].as_bool().unwrap_or(false) }))?;
+        match preset_img(node, id) {
+            Some(b) => {
+                std::fs::write(st_file(node), b).map_err(|e| e.to_string())?;
+            }
+            None => {
+                let _ = std::fs::remove_file(st_file(node));
+            }
+        }
+        v["active"] = json!(id);
+    }
+    std::fs::write(&f, v.to_string()).map_err(|e| e.to_string())?;
+    node.notify_all("avatar");
+    Ok(presets(node))
+}
+
+/// Полная тишина на этом ПК (статус с флажком «тишина»): приложение не издаёт ни звука.
+pub fn silent(node: &Node) -> bool {
+    own_style(node).get("stSilent").and_then(|x| x.as_bool()).unwrap_or(false)
+}
+
+/// У соседа полная тишина (по его плитке в кэше).
+pub fn peer_silent(node: &Node, peer: &str) -> bool {
+    std::fs::read_to_string(cache(node, peer, "json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).map(|v| v["hash"] == node.peer_state(peer).tile.as_str() && v["style"]["stSilent"] == true).unwrap_or(false)
 }
 
 pub fn remove_st_img(node: &Arc<Node>) {
@@ -245,6 +389,38 @@ pub async fn img_of_peer(node: &Arc<Node>, peer: &str) -> Option<Vec<u8>> {
     if code != 200 || b.len() > IMG_MAX || crate::avatar::mime_of(&b).is_none() {
         return None;
     }
+    let _ = std::fs::write(&f, &b);
+    Some(b)
+}
+
+/// Свой статус для панели (и для состояния канала): {text, color, silent, img — отпечаток значка}; null — без статуса.
+pub fn own_status(node: &Node) -> Value {
+    let st = own_style(node);
+    let img = st_hash(node);
+    if st.get("stText").is_none() && st.get("stColor").is_none() && st.get("stSilent").is_none() && img.is_empty() {
+        return Value::Null;
+    }
+    json!({ "text": st["stText"].as_str().unwrap_or(""), "color": st["stColor"].as_str().unwrap_or(""), "silent": st["stSilent"].as_bool().unwrap_or(false), "img": img })
+}
+
+/// Значок статуса соседа по отпечатку `want` (из состояния канала): кэш, иначе — сразу у соседа, не дожидаясь обмена.
+pub async fn st_img_fresh(node: &Arc<Node>, peer: &str, want: &str) -> Option<Vec<u8>> {
+    if want.is_empty() {
+        return st_img_of_peer(node, peer).await;
+    }
+    let f = cache(node, peer, "st");
+    if let Ok(b) = std::fs::read(&f) {
+        if crate::avatar::hash_of(&b) == want {
+            return Some(b);
+        }
+    }
+    let p = node.cfg.read().peer(peer).cloned()?;
+    let client = node.client_for(&p);
+    let (code, b) = tokio::time::timeout(std::time::Duration::from_secs(15), client.get_bytes("/peer/tile/stimg")).await.ok()?.ok()?;
+    if code != 200 || b.len() > ST_MAX || crate::avatar::mime_of(&b).is_none() {
+        return None;
+    }
+    let _ = std::fs::create_dir_all(f.parent()?);
     let _ = std::fs::write(&f, &b);
     Some(b)
 }

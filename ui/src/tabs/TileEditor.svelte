@@ -7,8 +7,9 @@
   import { pickFiles } from '../lib/util';
   import { avatarPick, avatarRemove } from '../lib/avatar';
   import { AV, loadAvatars } from '../voice/engine.svelte';
-  import { TILE_DEFAULT, TILES, tileImgUrl, stImgUrl, tileVars, tileCls, type TileStyle } from '../lib/tile.svelte';
+  import { TILE_DEFAULT, TILES, tileImgUrl, tileVars, tileCls, type TileStyle } from '../lib/tile.svelte';
   import TileArt from '../components/TileArt.svelte';
+  import StatusPresets from '../components/StatusPresets.svelte';
   import Av from '../components/Av.svelte';
 
   let st = $state<TileStyle>({});
@@ -20,31 +21,10 @@
   const url = $derived(tileImgUrl(me(), img));
 
   $effect(() => {
-    api('GET', 'tile').then(r => { st = r.style || {}; img = r.img || ''; stImg = r.stImg || ''; stText = st.stText || ''; loaded = true; }).catch(e => toast('Плитка: ' + e.message, 'bad'));
+    api('GET', 'tile').then(r => { st = r.style || {}; img = r.img || ''; loaded = true; }).catch(e => toast('Плитка: ' + e.message, 'bad'));
   });
 
-  // статус: текст и значок (цвет или картинка); видят все в канале при наведении на плитку
-  let stText = $state('');
-  let stImg = $state('');
-  const ST_COLORS = ['#5DE08E', '#FFB547', '#FF4F64', '#38E1F0', '#9B7BFF', '#FF8FA0', '#E8EAFB', '#5B6092'];
-  async function stSave(p: { text?: string; color?: string }) {
-    try {
-      const r = await api('POST', 'tile/status', p);
-      const n: any = { ...st }; if (r.status.text) n.stText = r.status.text; else delete n.stText; if (r.status.color) n.stColor = r.status.color; else delete n.stColor; st = n;
-      TILES[me()] = { style: n, img, stImg, h: r.hash }; await loadAvatars();
-    } catch (e: any) { toast('Статус: ' + e.message, 'bad'); }
-  }
-  async function stPick() {
-    const [f] = await pickFiles({ accept: 'image/*' }); if (!f) return;
-    try {
-      let body: Blob = f;
-      if (!(f.type === 'image/gif' || /\.gif$/i.test(f.name))) { const bmp = await createImageBitmap(f), k = Math.min(1, 96 / Math.max(bmp.width, bmp.height)); const c = document.createElement('canvas'); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k); c.getContext('2d')!.drawImage(bmp, 0, 0, c.width, c.height); body = await new Promise<Blob>(r => c.toBlob(b => r(b!), 'image/png')); }
-      else if (f.size > 256 * 1024) throw new Error('гифка больше 256 КБ');
-      const r = await api('POST', 'tile/status/image', body, true); stImg = r.img; TILES[me()] = { style: st, img, stImg, h: r.hash }; await loadAvatars();
-    } catch (e: any) { toast('Значок: ' + e.message, 'bad'); }
-  }
-  async function stDropImg() { await api('POST', 'tile/status/image/remove'); stImg = ''; await stSave({}); }
-  async function stClear() { if (stImg) await api('POST', 'tile/status/image/remove'); stImg = ''; stText = ''; await stSave({ text: '', color: '' }); toast('Статус убран'); }
+
 
   let saveT = 0;
   function set<K extends keyof TileStyle>(k: K, v: TileStyle[K] | '' | undefined) {
@@ -56,8 +36,9 @@
   }
   async function save() {
     try {
-      const r = await api('POST', 'tile', { style: $state.snapshot(st) });
-      TILES[me()] = { style: r.style, img, h: r.hash };
+      const snap: any = { ...$state.snapshot(st) }; delete snap.stText; delete snap.stColor; // статус — заготовками, стиль его не трогает
+      const r = await api('POST', 'tile', { style: snap });
+      // плитка обновится по новому отпечатку (loadAvatars)
       await loadAvatars();
     } catch (e: any) { toast('Плитка: ' + e.message, 'bad'); }
   }
@@ -137,16 +118,7 @@
     <button class="b sm" onclick={reset} disabled={!loaded || (!img && !Object.keys(st).length)}>Сбросить плитку</button>
   </div>
   <div class="tctl">
-    <div class="card"><h3>Статус</h3>
-      <div class="small muted" style="margin-bottom:8px">Видят все в канале: наведите мышь на плитку — статус покажется рядом.</div>
-      <div class="stedit">
-        <span class="sticon" style={stImg ? '' : 'background:' + (st.stColor || 'transparent')} class:empty={!stImg && !st.stColor}>{#if stImg}<img src={stImgUrl(me(), stImg)} alt="" />{/if}</span>
-        <input class="grow" maxlength="255" placeholder="Чем заняты: «на созвоне до 15:00», «собираю билд»" bind:value={stText} onkeydown={e => { if (e.key === 'Enter') stSave({ text: stText }); }} onblur={() => { if ((st.stText || '') !== stText.trim()) stSave({ text: stText }); }} aria-label="Текст статуса" />
-        <span class="small muted stcount">{stText.length}/255</span>
-      </div>
-      <div class="setrow"><span>Значок</span><span class="row" style="gap:6px;flex-wrap:wrap">{#each ST_COLORS as c}<button class="stsw" class:on={st.stColor === c && !stImg} style="background:{c}" title={c} aria-label={'Цвет ' + c} onclick={() => stSave({ color: c })}></button>{/each}<button class="b sm" onclick={stPick}>{stImg ? 'Сменить картинку…' : 'Картинка…'}</button>{#if stImg}<button class="b sm" onclick={stDropImg}>Без картинки</button>{/if}</span><span></span></div>
-      <div class="row" style="justify-content:flex-end"><button class="b sm" onclick={stClear} disabled={!st.stText && !st.stColor && !stImg}>Убрать статус</button></div>
-    </div>
+    <div class="card"><h3>Статусы</h3><StatusPresets /></div>
     <div class="card"><h3>Картинка плитки</h3>
       <div class="setrow"><span>Фон <span class="muted">· картинка или гифка до 4 МБ</span></span><span class="row" style="gap:8px"><button class="b sm pri" onclick={pickImg} disabled={busy}>{img ? 'Сменить…' : 'Выбрать…'}</button><button class="b sm" onclick={dropImg} disabled={!img || busy}>Убрать</button></span><span></span></div>
       <div class="setrow"><span>Вписать</span>{@render seg('fit', FITS, S.fit)}<span></span></div>

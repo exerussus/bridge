@@ -11,7 +11,7 @@ import { R, rsend, rosterOf, reachable, SESSION, onRoomMsg, onUiMsg, onLeave, on
 const COLS = ['#38E1F0', '#FFB547', '#5DE08E', '#FF6B7D', '#9B7BFF', '#F5E26B', '#7FD1FF'];
 export const colOf = (n: string) => { let h = 0; for (const ch of n) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return COLS[h % COLS.length]; };
 
-/** Режим инструмента на каждом показе ('ping' | 'draw' | 'ctl') и «я управляю чужим ПК». */
+/** Режим инструмента на каждом показе ('ping' | 'draw' | 'erase' | 'ctl') и «я управляю чужим ПК». */
 export const SX = $state({
   mode: {} as Record<string, string>,
   cv: { stream: '', peer: '', keyboard: false },
@@ -27,8 +27,8 @@ export function streamOf(id: string) {
   for (const p of rosterOf(R.key)) for (const s of p.st.streams || []) if (s.id === id) return { n: p.name, ...s };
   return null;
 }
-export function setMode(id: string, mode: string) {
-  SX.mode[id] = SX.mode[id] === mode ? '' : mode;
+export function setMode(id: string, mode: string, force = false) {
+  SX.mode[id] = !force && SX.mode[id] === mode ? '' : mode;
   if (SX.mode[id] === 'ctl' && SX.cv.stream !== id) SX.mode[id] = '';
   if (SX.mode[id] === 'ctl') (document.querySelector('[data-stream="' + CSS.escape(id) + '"] canvas.ann') as HTMLElement | null)?.focus();
 }
@@ -49,7 +49,7 @@ export function decorate(c: HTMLCanvasElement, s0: any) {
   let s = s0;
   const v = c.parentElement!.querySelector('video') as HTMLVideoElement;
   c.tabIndex = 0;
-  let line: any = null, lastSend = 0;
+  let line: any = null, lastSend = 0, erasing = false;
   const mode = () => SX.mode[s.id] || '';
   const on = (t: string, f: any, o?: any) => c.addEventListener(t, f, o);
   on('contextmenu', (e: Event) => { if (mode()) e.preventDefault(); });
@@ -59,16 +59,19 @@ export function decorate(c: HTMLCanvasElement, s0: any) {
     const p = norm(v, e);
     if (m === 'ping') { if (p.inside) ann(s, { k: 'ping', x: +p.x.toFixed(4), y: +p.y.toFixed(4) }); return; }
     if (m === 'draw') { line = { k: 'line', id: SESSION + Date.now().toString(36), pts: [+p.x.toFixed(4), +p.y.toFixed(4)] }; return; }
+    if (m === 'erase') { erasing = true; eraseAt(s, v, p); return; }
     if (m === 'ctl') ctlPush({ t: 'd', b: e.button, x: +p.x.toFixed(5), y: +p.y.toFixed(5) });
   });
   on('pointermove', (e: PointerEvent) => {
     const m = mode(); if (!m) return;
     const p = norm(v, e);
     if (m === 'draw' && line) { line.pts.push(+p.x.toFixed(4), +p.y.toFixed(4)); localItem(s.id, ME(), line); if (Date.now() - lastSend > 60) { lastSend = Date.now(); ann(s, line); } return; }
+    if (m === 'erase' && erasing) { eraseAt(s, v, p); return; }
     if (m === 'ctl' && p.inside) ctlPush({ t: 'm', x: +p.x.toFixed(5), y: +p.y.toFixed(5) });
   });
   const end = (e: PointerEvent) => {
     const m = mode();
+    erasing = false;
     if (m === 'draw' && line) { line.done = true; ann(s, line); line = null; }
     if (m === 'ctl' && e.type === 'pointerup') { const p = norm(v, e); ctlPush({ t: 'u', b: e.button, x: +p.x.toFixed(5), y: +p.y.toFixed(5) }); }
   };
@@ -81,10 +84,53 @@ export function decorate(c: HTMLCanvasElement, s0: any) {
   return { update(n: any) { s = n; }, destroy() { ro.disconnect(); } };
 }
 
+/** Стёрка: свои линии, которых коснулся указатель (≈12 px), исчезают у всех. */
+function eraseAt(s: any, v: HTMLVideoElement | { w: number; h: number }, p: { x: number; y: number }) {
+  const b = v instanceof HTMLVideoElement ? contentBox(v) : v, rx = 12 / Math.max(1, b.w), ry = 12 / Math.max(1, b.h);
+  for (const it of [...(AN.items[s.id] || [])]) {
+    if (it.k !== 'line' || it.by !== ME()) continue;
+    let hit = false;
+    for (let i = 0; i + 1 < it.pts.length && !hit; i += 2) {
+      const ax = it.pts[i], ay = it.pts[i + 1], bx = it.pts[i + 2] ?? ax, by = it.pts[i + 3] ?? ay;
+      const dx = (bx - ax) / rx, dy = (by - ay) / ry, px = (p.x - ax) / rx, py = (p.y - ay) / ry, L = dx * dx + dy * dy;
+      const t = L ? Math.max(0, Math.min(1, (px * dx + py * dy) / L)) : 0;
+      hit = (px - t * dx) ** 2 + (py - t * dy) ** 2 <= 1;
+    }
+    if (hit) ann(s, { k: 'del', id: it.id });
+  }
+}
+
+// ── горячие клавиши инструментов при просмотре показа ──
+export const SCR_KEYS_DEF: Record<string, string> = { mouse: 'KeyQ', ping: 'KeyW', draw: 'KeyE', erase: 'KeyR' };
+export const SCR_TOOLS: [string, string][] = [['mouse', 'Мышь'], ['ping', 'Пинг'], ['draw', 'Карандаш'], ['erase', 'Стёрка']];
+export function scrKeys(): Record<string, string> { return { ...SCR_KEYS_DEF, ...(SET.scrKeys || {}) }; }
+/** Показ, к которому относится клавиша: под мышью, иначе единственный открытый. */
+let hoverStream = '';
+if (typeof document !== 'undefined') {
+  document.addEventListener('pointerover', e => { const el = (e.target as Element | null)?.closest?.('.streams [data-stream]') as HTMLElement | null; hoverStream = el?.dataset.stream || ''; }, true);
+  document.addEventListener('keydown', e => {
+    if (e.ctrlKey || e.altKey || e.metaKey || e.repeat) return;
+    const t = e.target as HTMLElement | null;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+    const vis = [...document.querySelectorAll<HTMLElement>('.streams [data-stream]')].filter(el => el.offsetParent && el.querySelector('canvas.ann'));
+    if (!vis.length) return;
+    const bd = document.querySelector<HTMLElement>('.bdcv');
+    const el = vis.find(x => x.dataset.stream === hoverStream) || (vis.length === 1 && !(bd && bd.offsetParent) ? vis[0] : null);
+    const id = el?.dataset.stream; if (!id) return;
+    if (SX.mode[id] === 'ctl') return;
+    const k = scrKeys(), tool = Object.keys(k).find(x => k[x] === e.code);
+    if (!tool) return;
+    e.preventDefault();
+    setMode(id, tool === 'mouse' ? '' : tool, true);
+  });
+}
+export function keyName(code: string) { return !code ? '—' : code.replace(/^Key/, '').replace(/^Digit/, '').replace(/^Numpad/, 'Num ').replace('Backquote', '`'); }
+
 // ── пометки ──
 function localItem(stream: string, by: string, a: any) {
   const list = (AN.items[stream] = AN.items[stream] || []);
   if (a.k === 'clear') { AN.items[stream] = list.filter(x => x.by !== by); kick(); return; }
+  if (a.k === 'del') { AN.items[stream] = list.filter(x => !(x.by === by && x.id === a.id)); kick(); return; }
   if (a.k === 'line') { const i = list.findIndex(x => x.k === 'line' && x.id === a.id); const it = { ...a, by, t: Date.now(), col: colOf(by) }; if (i >= 0) list[i] = it; else list.push(it); }
   else list.push({ ...a, by, t: Date.now(), col: colOf(by) });
   if (list.length > 300) list.splice(0, list.length - 300);
@@ -308,4 +354,6 @@ export function setStreamVol(id: string, v: number) {
   me: () => ME(),
   title: (n: string) => titleOf(n),
   session: SESSION,
+  keys: () => scrKeys(),
+  erase: (id: string, x: number, y: number, w: number, h: number) => { if (R.remote[id]) eraseAt({ id }, { w, h }, { x, y }); },
 };

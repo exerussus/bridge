@@ -3,7 +3,7 @@ resolver = "2"
 members = ["core", "node", "app"]
 
 [workspace.package]
-version = "3.3.1"
+version = "3.5.0"
 edition = "2021"
 license = "UNLICENSED"
 
@@ -19,7 +19,7 @@ rand = "0.8"
 unicode-normalization = "0.1"
 parking_lot = "0.12"
 tokio = { version = "1", features = ["io-std", "rt-multi-thread", "macros", "net", "time", "sync", "fs", "io-util", "process", "signal"] }
-axum = { version = "0.7", default-features = false, features = ["http1", "json", "query", "tokio", "macros"] }
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "query", "tokio", "macros", "ws"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 notify = { version = "6", default-features = false, features = ["macos_kqueue"] }

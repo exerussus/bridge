@@ -660,6 +660,8 @@ body.vsplitting{cursor:col-resize;user-select:none}
 .sv:fullscreen video{max-height:none;height:100%}
 .sv canvas.ann{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;outline:none}
 .sv canvas.ann[data-mode=ping],.sv canvas.ann[data-mode=draw]{pointer-events:auto;cursor:crosshair}
+.sv canvas.ann[data-mode=erase]{pointer-events:auto;cursor:cell}
+.kbind{min-width:64px;font-family:inherit;font-weight:700}.kbind.wait{box-shadow:0 0 0 2px var(--acc,#38E1F0)}
 .sv canvas.ann[data-mode=ctl]{pointer-events:auto;cursor:default;box-shadow:inset 0 0 0 2px rgba(255,79,100,.7)}
 .sv canvas.ann[data-mode=ctl]:focus{box-shadow:inset 0 0 0 3px #FF4F64}
 .ctlbar{position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:80;display:flex;align-items:center;gap:12px;padding:8px 10px 8px 16px;border-radius:12px;background:#C8102E;color:#fff;box-shadow:0 12px 40px rgba(200,16,46,.5);font-size:13px}

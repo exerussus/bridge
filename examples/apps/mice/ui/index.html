@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Мыши</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0B0C1A; color: #E8EAFB; font: 14px system-ui, sans-serif; overflow: hidden; }
+  body.light { background: #F6F7FC; color: #14152B; }
+  #bar { position: fixed; left: 0; right: 0; top: 0; display: flex; gap: 12px; align-items: center; padding: 8px 12px; background: rgba(18,19,42,.85); z-index: 2; }
+  body.light #bar { background: rgba(255,255,255,.85); }
+  #bar .grow { flex: 1; }
+  #c { position: fixed; inset: 0; cursor: crosshair; }
+  .muted { opacity: .7; font-size: 12px; }
+</style>
+<script src="/most/sdk.js"></script>
+</head>
+<body>
+<div id="bar"><b>Мыши</b><span id="st" class="muted">подключаюсь…</span><span class="grow"></span><span>Щелчков: <b id="score">0</b></span><span id="who" class="muted"></span></div>
+<canvas id="c"></canvas>
+<script>
+// Образец сетевого приложения моста: всё через most.session — сеанс в вашем голосовом канале.
+// Курсоры — «последнее по ключу» (не копятся при заторе), точки — надёжно, счёт — общее состояние сеанса.
+const COLS = ['#38E1F0', '#FFB547', '#5DE08E', '#FF6B7D', '#9B7BFF', '#F5E26B', '#7FD1FF', '#FF9DE2'];
+const c = document.getElementById('c'), ctx = c.getContext('2d'), $ = id => document.getElementById(id);
+const cursors = {}, dots = [];
+window.__mice = { cursors, dots }; // для проверок
+let me = -1, sendT = 0;
+const name = cid => (most.session.members.find(m => m.cid === cid) || {}).name || ('игрок ' + cid);
+const col = cid => COLS[cid % COLS.length];
+function resize() { c.width = innerWidth * devicePixelRatio; c.height = innerHeight * devicePixelRatio; }
+addEventListener('resize', resize); resize();
+function status() {
+  const s = most.session;
+  $('st').textContent = s.id ? (s.isHost ? 'вы хост' : 'в сеансе') + ' · игроков: ' + s.members.length + (s.isHost ? '' : ' · задержка ' + s.rtt() + ' мс') : 'не в сеансе — зайдите в голосовой канал';
+  $('score').textContent = (most.session.state.get().clicks || 0);
+}
+async function start() {
+  const info = await most.ready();
+  document.body.classList.toggle('light', info.theme === 'light');
+  try { const j = await most.session.joinOrCreate(); me = j.you; } catch (e) { $('st').textContent = e.message; setTimeout(start, 3000); return; }
+  status();
+}
+most.on('theme', t => document.body.classList.toggle('light', t === 'light'));
+most.session.on('member', status); most.session.on('state', status); most.session.on('clock', status);
+most.session.on('left', e => { delete cursors[e.cid]; status(); });
+most.session.on('ended', why => { $('st').textContent = 'сеанс закончился: ' + why; for (const k in cursors) delete cursors[k]; setTimeout(start, 2000); });
+most.session.on('data', m => {
+  const v = m.json();
+  if (v.t === 'cur') cursors[m.from] = { x: v.x, y: v.y, at: Date.now() };
+  else if (v.t === 'dot') dots.push({ x: v.x, y: v.y, cid: m.from, at: Date.now() });
+});
+c.addEventListener('pointermove', e => {
+  if (!most.session.id) return;
+  const now = Date.now(); if (now - sendT < 30) return; sendT = now;
+  most.session.sendJson(most.session.OTHERS, { t: 'cur', x: e.clientX / innerWidth, y: e.clientY / innerHeight }, 'latest', 1);
+});
+c.addEventListener('pointerdown', e => {
+  if (!most.session.id) return;
+  const d = { t: 'dot', x: e.clientX / innerWidth, y: e.clientY / innerHeight };
+  dots.push({ x: d.x, y: d.y, cid: most.session.me, at: Date.now() });
+  most.session.sendJson(most.session.OTHERS, d, 'reliable');
+  most.session.state.set('clicks', (most.session.state.get().clicks || 0) + 1);
+});
+(function draw() {
+  requestAnimationFrame(draw);
+  const W = innerWidth, H = innerHeight, k = devicePixelRatio;
+  ctx.setTransform(k, 0, 0, k, 0, 0); ctx.clearRect(0, 0, W, H);
+  const now = Date.now();
+  for (let i = dots.length - 1; i >= 0; i--) { const d = dots[i], age = (now - d.at) / 4000; if (age > 1) { dots.splice(i, 1); continue; }
+    ctx.globalAlpha = 1 - age; ctx.fillStyle = col(d.cid); ctx.beginPath(); ctx.arc(d.x * W, d.y * H, 8 + age * 20, 0, 7); ctx.fill(); }
+  ctx.globalAlpha = 1; ctx.font = '600 12px system-ui';
+  for (const [cid, p] of Object.entries(cursors)) {
+    if (now - p.at > 15000) continue;
+    const x = p.x * W, y = p.y * H; ctx.fillStyle = col(+cid);
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + 14, y + 10); ctx.lineTo(x + 6, y + 12); ctx.lineTo(x + 3, y + 19); ctx.closePath(); ctx.fill();
+    ctx.fillText(name(+cid), x + 14, y + 26);
+  }
+})();
+start();
+</script>
+</body>
+</html>

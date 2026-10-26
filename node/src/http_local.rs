@@ -93,6 +93,8 @@ pub fn routes() -> Router<Arc<Node>> {
         .route(&l("builds"), get(|State(n): St| async move { ok_json(&crate::builds::status(&n)) }))
         .route(&l("builds/send"), post(builds_send))
         .route(&l("builds/target"), post(builds_target))
+        .route(&l("builds/presets"), get(|State(n): St| async move { ok_json(&json!({ "list": crate::builds::presets(&n) })) }).post(builds_presets))
+        .route(&l("builds/preview"), post(builds_preview))
         .route(&l("mailbox/cancel"), post(mailbox_cancel))
         .route(&l("mailbox/incoming"), get(mailbox_incoming))
         .route(&l("mailbox/incoming/file"), get(mailbox_incoming_file))
@@ -168,6 +170,10 @@ pub fn routes() -> Router<Arc<Node>> {
         .route(&l("tile/image"), get(tile_img_get).post(tile_img_set))
         .route(&l("tile/image/remove"), post(|State(n): St| async move { crate::tile::remove_img(&n); ok_json(&json!({ "ok": true })) }))
         .route(&l("tile/status"), post(tile_status_set))
+        .route(&l("tile/status/presets"), get(|State(n): St| async move { ok_json(&crate::tile::presets(&n)) }).post(tile_presets_set))
+        .route(&l("tile/status/apply"), post(tile_preset_apply))
+        .route(&l("tile/status/preset/image"), get(tile_preset_img_get).post(tile_preset_img_set))
+        .route(&l("tile/status/preset/image/remove"), post(tile_preset_img_remove))
         .route(&l("tile/status/image"), get(tile_st_img_get).post(tile_st_img_set))
         .route(&l("tile/status/image/remove"), post(|State(n): St| async move { crate::tile::remove_st_img(&n); ok_json(&json!({ "ok": true })) }))
         .route(&l("tile/reset"), post(|State(n): St| async move { crate::tile::reset(&n); ok_json(&json!({ "ok": true })) }))
@@ -239,7 +245,7 @@ async fn page(State(node): St, app: Option<axum::Extension<FromApp>>) -> Respons
 }
 
 /// Политика панели: только свои скрипты; ipc.localhost — связь окна приложения с программой; worker и wasm — просмотр PDF.
-pub const PANEL_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; connect-src 'self' ipc: http://ipc.localhost; worker-src 'self' blob:; font-src 'self' data:; frame-ancestors 'none'";
+pub const PANEL_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; connect-src 'self' ipc: http://ipc.localhost ws://127.0.0.1:*; worker-src 'self' blob:; font-src 'self' data:; frame-src 'self' http://127.0.0.1:* http://localhost:*; frame-ancestors 'none'";
 
 /// Файлы сборки панели (/app/…): имена с хэшем — кэшировать можно навсегда.
 async fn ui_asset(AxPath(path): AxPath<String>) -> Response {
@@ -1019,10 +1025,47 @@ pub(crate) async fn body_to_tmp(node: &Node, req: Request) -> Result<PathBuf, Re
     Ok(tmp)
 }
 
-/// POST builds/send {peer, path, name, mode: patch|clean} — упаковать папку сборки и отправить (в фоне).
+/// POST builds/presets {list} — заготовки сборок целиком.
+async fn builds_presets(State(node): St, Json(v): Json<Value>) -> Response {
+    match crate::builds::set_presets(&node, &v["list"]) {
+        Ok(l) => ok_json(&json!({ "ok": true, "list": l })),
+        Err(e) => err(400, e),
+    }
+}
+
+/// POST builds/preview {path, ignore} или {preset} — что войдёт в архив и что отсеет игнор.
+async fn builds_preview(State(node): St, Json(v): Json<Value>) -> Response {
+    let (path, ignore) = match v["preset"].as_str().filter(|x| !x.is_empty()) {
+        Some(id) => match crate::builds::presets(&node).into_iter().find(|p| p["id"] == id) {
+            Some(p) => (p["path"].as_str().unwrap_or("").to_string(), p["ignore"].clone()),
+            None => return err(404, "нет такой заготовки"),
+        },
+        None => (v["path"].as_str().unwrap_or("").to_string(), v["ignore"].clone()),
+    };
+    let ignore: Vec<String> = match &ignore {
+        Value::Array(a) => a.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+        Value::String(t) => t.lines().map(String::from).collect(),
+        _ => vec![],
+    };
+    let n2 = node.clone();
+    match tokio::task::spawn_blocking(move || crate::builds::preview(&n2, &path, &ignore)).await {
+        Ok(Ok(r)) => ok_json(&r),
+        Ok(Err(e)) => err(400, e),
+        Err(e) => err(500, e.to_string()),
+    }
+}
+
+/// POST builds/send {preset, mode?} — по заготовке всем её получателям; или {peer, path, name, mode, ignore?} — разово.
 async fn builds_send(State(node): St, Json(v): Json<Value>) -> Response {
     let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
-    match crate::builds::send(&node, &s("peer"), &s("path"), &s("name"), &s("mode")) {
+    if !s("preset").is_empty() {
+        return match crate::builds::send_preset(&node, &s("preset"), Some(&s("mode"))) {
+            Ok(r) => ok_json(&r),
+            Err((c, e)) => err(c, e),
+        };
+    }
+    let ignore: Vec<String> = v["ignore"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+    match crate::builds::send_ex(&node, &s("peer"), &s("path"), &s("name"), &s("mode"), &ignore, "") {
         Ok(r) => ok_json(&r),
         Err((c, e)) => err(c, e),
     }
@@ -1064,6 +1107,7 @@ async fn mailbox_upload(State(node): St, Query(m): Q, req: Request) -> Response 
     if let Err(e) = bridge_core::files::move_replace(&tmp, &full) {
         return err(500, e.to_string());
     }
+    crate::activity::record(&node, "files.sent", json!({ "bytes": std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0) }));
     // готов к отправке сразу
     bridge_core::files::set_mtime(&full, &(time::now() - chrono::Duration::seconds(5)));
     node.mailbox.dirty.store(true, Ordering::SeqCst);
@@ -1135,6 +1179,7 @@ async fn open_dir(State(node): St, Query(m): Q) -> Response {
         "mounts" => Some(node.folders.mount_root(&node)),
         "node" => Some(node.base_dir.clone()),
         "phone-outbox" => Some(node.resolve(&cfg.mobile.outbox)),
+        "apps" => Some(crate::apps::folder(&node)),
         "build" => crate::builds::clean_name(q(&m, "name")).ok().map(|n| crate::builds::target_dir(&node, q(&m, "peer"), &n)),
         _ => None,
     };
@@ -1744,7 +1789,7 @@ async fn api_index() -> Response {
             "GET board/rooms", "GET board/describe?room", "GET board/find?room&q&type&layer&by&x0&y0&x1&y1&limit", "GET board/get?room&ids",
             "POST board/add {room, objs: [{type: text|note|rect|arrow|line|path|image|pdf, …}], layer?, at?, layout?}", "POST board/edit {room, id|ids, …}", "POST board/move {room, ids, dx, dy | x, y}",
             "POST board/remove {room, ids}", "POST board/clear {room, layer?}", "POST board/layer {room, action, layer?, name?, to?}", "POST board/bg {room, color?, light?}", "POST board/enable {room, on}",
-            "GET tile[?peer]", "POST tile {style}", "POST tile/image (тело — картинка)", "POST tile/image/remove", "POST tile/reset", "POST tile/status {text?, color?}", "GET tile/status/image[?peer]", "POST tile/status/image", "POST tile/status/image/remove",
+            "GET tile[?peer]", "POST tile {style}", "POST tile/image (тело — картинка)", "POST tile/image/remove", "POST tile/reset", "POST tile/status {text?, color?}", "GET|POST tile/status/presets {list: [{id, text, color}]}", "POST tile/status/apply {id}", "GET|POST tile/status/preset/image?id", "POST tile/status/preset/image/remove?id", "GET tile/status/image[?peer]", "POST tile/status/image", "POST tile/status/image/remove",
         ],
     }))
 }
@@ -2540,7 +2585,7 @@ async fn avatar_remove(State(node): St) -> Response {
 async fn avatars(State(node): St) -> Response {
     let peers: serde_json::Map<String, Value> = node.peers.lock().values().filter(|p| !p.avatar.is_empty()).map(|p| (p.name.clone(), json!(p.avatar))).collect();
     let sounds: serde_json::Map<String, Value> = node.peers.lock().values().filter(|p| !p.sound.is_empty()).map(|p| (p.name.clone(), json!(p.sound))).collect();
-    ok_json(&json!({ "me": crate::avatar::own_hash(&node), "node": node.node_name(), "peers": peers, "sound": crate::sound::own_hash(&node), "sounds": sounds, "tile": crate::tile::own_hash(&node), "tiles": node.peers.lock().values().filter(|p| !p.tile.is_empty()).map(|p| (p.name.clone(), json!(p.tile))).collect::<serde_json::Map<String, Value>>(), "ping": crate::sound::ping_hash(&node), "pings": node.peers.lock().values().filter(|p| !p.ping.is_empty()).map(|p| (p.name.clone(), json!(p.ping))).collect::<serde_json::Map<String, Value>>() }))
+    ok_json(&json!({ "me": crate::avatar::own_hash(&node), "node": node.node_name(), "peers": peers, "sound": crate::sound::own_hash(&node), "sounds": sounds, "tile": crate::tile::own_hash(&node), "tiles": node.peers.lock().values().filter(|p| !p.tile.is_empty()).map(|p| (p.name.clone(), json!(p.tile))).collect::<serde_json::Map<String, Value>>(), "silent": crate::tile::silent(&node), "status": crate::tile::own_status(&node), "ping": crate::sound::ping_hash(&node), "pings": node.peers.lock().values().filter(|p| !p.ping.is_empty()).map(|p| (p.name.clone(), json!(p.ping))).collect::<serde_json::Map<String, Value>>() }))
 }
 
 // ───────────── Плитка участника ─────────────
@@ -2571,10 +2616,48 @@ async fn tile_status_set(State(node): St, Json(v): Json<Value>) -> Response {
     }
 }
 
+/// POST tile/status/presets {list: [{id, text, color}]} — заготовки статуса (до 20).
+async fn tile_presets_set(State(node): St, Json(v): Json<Value>) -> Response {
+    match crate::tile::set_presets(&node, &v) {
+        Ok(r) => ok_json(&json!({ "ok": true, "presets": r, "hash": crate::tile::own_hash(&node) })),
+        Err(e) => err(400, e),
+    }
+}
+
+/// POST tile/status/apply {id} — выбрать заготовку (пусто — без статуса).
+async fn tile_preset_apply(State(node): St, Json(v): Json<Value>) -> Response {
+    match crate::tile::apply_preset(&node, v["id"].as_str().unwrap_or("")) {
+        Ok(r) => ok_json(&json!({ "ok": true, "presets": r, "hash": crate::tile::own_hash(&node) })),
+        Err(e) => err(400, e),
+    }
+}
+
+async fn tile_preset_img_get(State(node): St, Query(m): Q) -> Response {
+    match crate::tile::preset_img(&node, q(&m, "id")) {
+        Some(b) => image(b),
+        None => err(404, "значка нет"),
+    }
+}
+
+async fn tile_preset_img_set(State(node): St, Query(m): Q, body: axum::body::Bytes) -> Response {
+    match crate::tile::set_preset_img(&node, q(&m, "id"), &body) {
+        Ok(h) => ok_json(&json!({ "ok": true, "img": h, "hash": crate::tile::own_hash(&node) })),
+        Err(e) => err(400, e),
+    }
+}
+
+async fn tile_preset_img_remove(State(node): St, Query(m): Q) -> Response {
+    match crate::tile::remove_preset_img(&node, q(&m, "id")) {
+        Ok(()) => ok_json(&json!({ "ok": true, "hash": crate::tile::own_hash(&node) })),
+        Err(e) => err(400, e),
+    }
+}
+
 /// GET tile/status/image[?peer] — значок статуса.
 async fn tile_st_img_get(State(node): St, Query(m): Q) -> Response {
     let peer = q(&m, "peer");
-    let b = if peer.is_empty() || eq_ic(peer, &node.node_name()) { crate::tile::own_st_img(&node) } else { crate::tile::st_img_of_peer(&node, peer).await };
+    // v — отпечаток значка из состояния канала: может быть новее того, что мост уже знает о соседе
+    let b = if peer.is_empty() || eq_ic(peer, &node.node_name()) { crate::tile::own_st_img(&node) } else { crate::tile::st_img_fresh(&node, peer, q(&m, "v")).await };
     match b {
         Some(b) => {
             let mime = crate::avatar::mime_of(&b).unwrap_or("application/octet-stream");
@@ -2852,7 +2935,12 @@ async fn board_op(State(node): St, Json(v): Json<Value>) -> Response {
     };
     let ops = v["ops"].as_array().cloned().unwrap_or_default();
     match crate::board::op(&node, &r, v["cs"].as_str().unwrap_or(""), &ops).await {
-        Ok(seq) => ok_json(&json!({ "ok": true, "seq": seq })),
+        Ok(seq) => {
+            if ops.iter().any(|o| o["t"] == "put" || o["t"] == "del") {
+                crate::activity::record(&node, "board.edit", json!({}));
+            }
+            ok_json(&json!({ "ok": true, "seq": seq }))
+        }
         Err((c, e)) => err(c, e),
     }
 }
@@ -3080,7 +3168,12 @@ async fn chat_send(State(node): St, Json(b): Json<ChatSend>) -> Response {
         }
     }
     match crate::chat::send_full(&node, &conv, &b.text, &b.author, &files, &b.reply).await {
-        Ok(v) => ok_json(&v),
+        Ok(v) => {
+            if b.author.is_empty() {
+                crate::activity::record(&node, "chat.message", json!({ "where": if conv.starts_with("ch:") { "channel" } else { "dm" }, "len": b.text.chars().count(), "files": files.len() }));
+            }
+            ok_json(&v)
+        }
         Err((c, e)) => err(c, e),
     }
 }

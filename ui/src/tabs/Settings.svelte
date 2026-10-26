@@ -9,6 +9,18 @@
   import Seg from '../components/Seg.svelte';
   import Av from '../components/Av.svelte';
   import TileEditor from './TileEditor.svelte';
+  import { SCR_TOOLS, SCR_KEYS_DEF, scrKeys, keyName as scrKeyName } from '../voice/screen.svelte';
+  let bindWait = $state('');
+  function bindKey(e: KeyboardEvent, k: string) {
+    if (bindWait !== k) return;
+    e.preventDefault(); e.stopPropagation();
+    if (e.code === 'Escape') { bindWait = ''; return; }
+    if (/^(Shift|Control|Alt|Meta)/.test(e.code) || e.code === 'Tab') return;
+    const cur = scrKeys(), next: Record<string, string> = { ...cur };
+    for (const x of Object.keys(next)) if (x !== k && next[x] === e.code) next[x] = cur[k]; // занятая клавиша — меняются местами
+    next[k] = e.code;
+    setSet('scrKeys', next); bindWait = '';
+  }
 
   const TABS: [string, string][] = [['tile', 'Плитка и аватарка'], ['audio', 'Звук и микрофон'], ['signals', 'Сигналы и пинг'], ['share', 'Показ экрана'], ['board', 'Доска'], ['look', 'Вид']];
   let mics = $state<MediaDeviceInfo[]>([]);
@@ -136,6 +148,14 @@
       <div class="setrow"><span>Звук системы</span><label class="small"><input type="checkbox" checked={SET.shareAudio} onchange={e => setSet('shareAudio', (e.target as HTMLInputElement).checked)} /> вместе с экраном</label><span></span></div>
       <div class="setrow"><span>Курсор</span><label class="small"><input type="checkbox" checked={SET.shareCursor} onchange={e => setSet('shareCursor', (e.target as HTMLInputElement).checked)} /> показывать указатель мыши</label><span></span></div>
       <div class="small muted">То же — в канале: «Показы» → ⚙.</div>
+    </div>
+    <div class="card"><h3>Клавиши при просмотре показа</h3>
+      {#each SCR_TOOLS as [k, label] (k)}
+        {@const cur = scrKeys()[k]}
+        <div class="setrow"><span>{label}</span><span><button class="b sm kbind" class:wait={bindWait === k} onclick={() => (bindWait = bindWait === k ? '' : k)} onkeydown={e => bindKey(e, k)}>{bindWait === k ? 'нажмите…' : scrKeyName(cur)}</button></span><span></span></div>
+      {/each}
+      <div class="setrow"><span></span><span><button class="b sm" onclick={() => { setSet('scrKeys', { ...SCR_KEYS_DEF }); bindWait = ''; }}>По умолчанию: Q W E R</button></span><span></span></div>
+      <div class="small muted">Работают, когда смотрите чужой показ (в панели и в отдельном окне): клавиша относится к показу под мышью или к единственному открытому. Не срабатывают, пока вы печатаете или управляете чужим ПК. Esc — отменить назначение.</div>
     </div>
   {:else if ui.stTab === 'board'}
     <div class="card"><h3>Доска</h3>

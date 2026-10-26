@@ -10,9 +10,9 @@ export type TileStyle = {
   opacity?: number; blur?: number; tint?: string; tintAmt?: number; base?: string; border?: string;
   avShape?: 'circle' | 'round' | 'square' | 'hex' | 'none'; avSize?: number; avRing?: string; glow?: string; name?: string;
   /** (3.3.1) статус: текст до 255 знаков и цвет значка */
-  stText?: string; stColor?: string;
+  stText?: string; stColor?: string; stSilent?: boolean;
 };
-export const TILE_DEFAULT: Required<Omit<TileStyle, 'tint' | 'base' | 'border' | 'avRing' | 'glow' | 'name' | 'stText' | 'stColor'>> = { fit: 'cover', x: 50, y: 50, zoom: 100, mask: 'bottom', soft: 60, opacity: 70, blur: 0, tintAmt: 0, avShape: 'circle', avSize: 100 };
+export const TILE_DEFAULT: Required<Omit<TileStyle, 'tint' | 'base' | 'border' | 'avRing' | 'glow' | 'name' | 'stText' | 'stColor' | 'stSilent'>> = { fit: 'cover', x: 50, y: 50, zoom: 100, mask: 'bottom', soft: 60, opacity: 70, blur: 0, tintAmt: 0, avShape: 'circle', avSize: 100 };
 
 type Tile = { style: TileStyle; img: string; h: string; stImg?: string };
 export const TILES = $state<Record<string, Tile>>({});

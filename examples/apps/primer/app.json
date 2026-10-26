@@ -1,0 +1,12 @@
+{
+  "id": "primer",
+  "name": "Пример",
+  "version": "1.0.0",
+  "description": "Образец веб-приложения моста: заметки в хранилище, файлы, уведомления и захват мыши и клавиатуры (как у будущего пульта ТВ).",
+  "author": "Мост",
+  "ui": "ui/index.html",
+  "icon": "ui/icon.svg",
+  "window": { "w": 520, "h": 720 },
+  "permissions": ["files.pick", "files.save", "notify", "input.capture"],
+  "bridge": "apps@1"
+}

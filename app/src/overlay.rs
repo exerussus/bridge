@@ -115,7 +115,7 @@ unsafe fn ensure(wd: i32, ht: i32) -> bool {
     })
 }
 
-/// Пометка от панели: {by, col, a: {k: ping|line|clear, x, y, id, pts, done}, w, h}.
+/// Пометка от панели: {by, col, a: {k: ping|line|clear|del, x, y, id, pts, done}, w, h}.
 pub unsafe fn push(d: &Value, main: HWND, timer: usize) {
     let prev = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     let (wd, ht) = (d["w"].as_i64().unwrap_or(0) as i32, d["h"].as_i64().unwrap_or(0) as i32);
@@ -141,6 +141,10 @@ pub unsafe fn push(d: &Value, main: HWND, timer: usize) {
                     }
                 }
                 "clear" => ov.items.retain(|it| it.by != by),
+                "del" => {
+                    let id = a["id"].as_str().unwrap_or("");
+                    ov.items.retain(|it| !(it.by == by && matches!(&it.kind, Kind::Line { id: i, .. } if i == id)));
+                }
                 _ => {}
             }
             if ov.items.len() > 300 {

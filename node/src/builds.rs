@@ -4,6 +4,9 @@
 //! - чистая — всё целиком; у получателя прежняя папка сборки уходит в корзину, на её место — присланное.
 //! Транспорт — ручная отправка: архив кладётся в «отправка/<сосед>/_сборки/<имя>/<режим>-<время>.zip»,
 //! получатель, приняв такой файл, распаковывает его в папку сборки (по умолчанию «сборки/<имя>», можно задать свою).
+//!
+//! (3.3.5) Заготовки сборок: папка, кому (можно нескольким), режим и игнор — шаблоны как в .gitignore
+//! (`Library/`, `*_BurstDebugInformation_DoNotShip/`, `**/*.pdb`, `!нужное.pdb` — вернуть исключённое).
 
 use crate::node::Node;
 use bridge_core::time;
@@ -56,6 +59,149 @@ fn history_file(node: &Node) -> PathBuf {
 }
 fn targets_file(node: &Node) -> PathBuf {
     dir(node).join("targets.json")
+}
+fn presets_file(node: &Node) -> PathBuf {
+    dir(node).join("presets.json")
+}
+
+// ───────────── заготовки ─────────────
+
+/// Игнор сборки: общий игнор моста + свои шаблоны; `!шаблон` возвращает исключённое.
+pub struct BuildIgnore {
+    global: Arc<bridge_core::ignore::IgnoreRules>,
+    own: bridge_core::ignore::IgnoreRules,
+    keep: bridge_core::ignore::IgnoreRules,
+}
+impl BuildIgnore {
+    pub fn new(node: &Node, lines: &[String]) -> Self {
+        let own = lines.iter().filter(|l| !l.trim_start().starts_with('!')).cloned();
+        let keep = lines.iter().filter_map(|l| l.trim_start().strip_prefix('!').map(|x| x.to_string()));
+        BuildIgnore { global: node.cfg.read().global_ignore(), own: bridge_core::ignore::IgnoreRules::new(own), keep: bridge_core::ignore::IgnoreRules::new(keep) }
+    }
+    /// Какое правило исключает файл (None — файл идёт в архив).
+    pub fn which(&self, rel: &str) -> Option<String> {
+        if let Some(r) = self.global.which(rel) {
+            return Some(format!("общий игнор: {}", r));
+        }
+        let r = self.own.which(rel)?;
+        if self.keep.is_ignored(rel) {
+            return None;
+        }
+        Some(r.to_string())
+    }
+}
+
+fn lines_of(v: &Value) -> Vec<String> {
+    match v {
+        Value::Array(a) => a.iter().filter_map(|x| x.as_str()).map(|x| x.to_string()).collect(),
+        Value::String(t) => t.lines().map(|x| x.to_string()).collect(),
+        _ => vec![],
+    }
+}
+
+pub fn presets(node: &Node) -> Vec<Value> {
+    read(&presets_file(node)).as_array().cloned().unwrap_or_default()
+}
+fn preset(node: &Node, id: &str) -> Option<Value> {
+    presets(node).into_iter().find(|p| p["id"] == id)
+}
+
+/// Сохранить заготовки целиком: [{id, name, path, peers: [..], mode, ignore: [строки]}] (до 50).
+pub fn set_presets(node: &Node, list: &Value) -> Result<Vec<Value>, String> {
+    let a = list.as_array().ok_or("list: массив заготовок")?;
+    if a.len() > 50 {
+        return Err("заготовок — не больше 50".into());
+    }
+    let cfg = node.cfg.read();
+    let mut out: Vec<Value> = Vec::new();
+    for p in a {
+        let id = p["id"].as_str().unwrap_or("").trim().to_string();
+        if id.is_empty() || id.len() > 40 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err(format!("id заготовки «{}»: латиница, цифры, - и _ (до 40)", id));
+        }
+        if out.iter().any(|x| x["id"] == id.as_str()) {
+            return Err(format!("id «{}» повторяется", id));
+        }
+        let name = clean_name(p["name"].as_str().unwrap_or("")).map_err(|e| format!("«{}»: {}", p["name"].as_str().unwrap_or(""), e))?;
+        let path = p["path"].as_str().unwrap_or("").trim().to_string();
+        if path.chars().count() > 1000 {
+            return Err(format!("«{}»: слишком длинный путь", name));
+        }
+        let mut peers: Vec<String> = Vec::new();
+        for x in p["peers"].as_array().cloned().unwrap_or_default().iter().filter_map(|x| x.as_str()) {
+            let real = cfg.peer(x).map(|pc| pc.name.clone()).unwrap_or_else(|| x.to_string());
+            if !peers.iter().any(|y| eq_ic(y, &real)) {
+                peers.push(real);
+            }
+        }
+        let mode = if p["mode"] == "clean" { "clean" } else { "patch" };
+        let ignore: Vec<String> = lines_of(&p["ignore"]).into_iter().map(|l| l.trim_end().to_string()).collect();
+        if ignore.len() > 500 {
+            return Err(format!("«{}»: в игноре не больше 500 строк", name));
+        }
+        let pats: Vec<String> = ignore.iter().map(|l| l.trim_start().trim_start_matches('!').to_string()).collect();
+        if let Some(e) = bridge_core::ignore::validate(&pats, &format!("игнор «{}»", name)).into_iter().next() {
+            return Err(e);
+        }
+        out.push(json!({ "id": id, "name": name, "path": path, "peers": peers, "mode": mode, "ignore": ignore }));
+    }
+    drop(cfg);
+    write(&presets_file(node), &json!(out));
+    node.emit("builds", json!({}));
+    Ok(out)
+}
+
+/// Что войдёт в архив: файлы и объём; что отсеет игнор — по правилам. Тяжёлое — звать из spawn_blocking.
+pub fn preview(node: &Node, src: &str, ignore: &[String]) -> Result<Value, String> {
+    let src = PathBuf::from(src.trim());
+    if !src.is_absolute() || !src.is_dir() {
+        return Err(format!("нет папки «{}» (нужен полный путь)", src.display()));
+    }
+    let ig = BuildIgnore::new(node, ignore);
+    let (mut files, mut bytes) = (0i64, 0i64);
+    let mut by: BTreeMap<String, (i64, i64, String)> = BTreeMap::new();
+    let mut biggest: Vec<(i64, String)> = Vec::new();
+    for w in bridge_core::scanner::walk(&src, &[]) {
+        match ig.which(&w.rel) {
+            Some(r) => {
+                let e = by.entry(r).or_insert((0, 0, w.rel.clone()));
+                e.0 += 1;
+                e.1 += w.size;
+            }
+            None => {
+                files += 1;
+                bytes += w.size;
+                biggest.push((w.size, w.rel.clone()));
+            }
+        }
+    }
+    biggest.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut rules: Vec<Value> = by.into_iter().map(|(r, (n, b, ex))| json!({ "rule": r, "files": n, "bytes": b, "example": ex })).collect();
+    rules.sort_by(|a, b| b["bytes"].as_i64().cmp(&a["bytes"].as_i64()));
+    let (ign_f, ign_b) = rules.iter().fold((0i64, 0i64), |a, r| (a.0 + r["files"].as_i64().unwrap_or(0), a.1 + r["bytes"].as_i64().unwrap_or(0)));
+    Ok(json!({ "files": files, "bytes": bytes, "ignoredFiles": ign_f, "ignoredBytes": ign_b, "rules": rules, "biggest": biggest.into_iter().take(8).map(|(s, p)| json!({ "path": p, "bytes": s })).collect::<Vec<_>>() }))
+}
+
+/// Отправить по заготовке всем её получателям.
+pub fn send_preset(node: &Arc<Node>, id: &str, mode: Option<&str>) -> Result<Value, (u16, String)> {
+    let p = preset(node, id).ok_or((404, "нет такой заготовки".to_string()))?;
+    let peers: Vec<String> = p["peers"].as_array().cloned().unwrap_or_default().iter().filter_map(|x| x.as_str().map(String::from)).collect();
+    if peers.is_empty() {
+        return Err((400, "у заготовки не выбрано, кому отправлять".into()));
+    }
+    let mode = mode.filter(|m| !m.is_empty()).unwrap_or(p["mode"].as_str().unwrap_or("patch")).to_string();
+    let ignore = lines_of(&p["ignore"]);
+    let (mut ok, mut errs) = (Vec::new(), Vec::new());
+    for peer in &peers {
+        match send_ex(node, peer, p["path"].as_str().unwrap_or(""), p["name"].as_str().unwrap_or(""), &mode, &ignore, id) {
+            Ok(_) => ok.push(peer.clone()),
+            Err((_, e)) => errs.push(format!("{}: {}", peer, e)),
+        }
+    }
+    if ok.is_empty() {
+        return Err((400, errs.join("; ")));
+    }
+    Ok(json!({ "ok": true, "started": ok, "errors": errs }))
 }
 
 fn remember(node: &Node, e: Value) {
@@ -120,6 +266,7 @@ pub fn status(node: &Node) -> Value {
         "history": h.as_array().cloned().unwrap_or_default().into_iter().rev().take(50).collect::<Vec<_>>(),
         "received": received,
         "jobs": node.builds.jobs.lock().values().cloned().collect::<Vec<_>>(),
+        "presets": presets(node),
         "defaultRoot": node.base_dir.join("сборки").display().to_string(),
     })
 }
@@ -128,6 +275,10 @@ pub fn status(node: &Node) -> Value {
 
 /// Упаковать папку и поставить в отправку. Долгое — идёт в фоне; ход виден в `jobs`.
 pub fn send(node: &Arc<Node>, peer: &str, src: &str, name: &str, mode: &str) -> Result<Value, (u16, String)> {
+    send_ex(node, peer, src, name, mode, &[], "")
+}
+
+pub fn send_ex(node: &Arc<Node>, peer: &str, src: &str, name: &str, mode: &str, ignore: &[String], preset: &str) -> Result<Value, (u16, String)> {
     let pc = node.cfg.read().peer(peer).cloned().ok_or((404, format!("нет соседа «{}»", peer)))?;
     let name = clean_name(name).map_err(|e| (400, e))?;
     if mode != "patch" && mode != "clean" {
@@ -141,11 +292,14 @@ pub fn send(node: &Arc<Node>, peer: &str, src: &str, name: &str, mode: &str) -> 
     if node.builds.jobs.lock().contains_key(&key) {
         return Err((409, "эта сборка этому соседу уже упаковывается".into()));
     }
-    node.builds.jobs.lock().insert(key.clone(), json!({ "peer": pc.name, "name": name, "mode": mode, "stage": "считаю файлы", "done": 0, "total": 0 }));
+    node.builds.jobs.lock().insert(key.clone(), json!({ "peer": pc.name, "name": name, "mode": mode, "preset": preset, "stage": "считаю файлы", "done": 0, "total": 0 }));
     let n2 = node.clone();
-    let (peer, mode2) = (pc.name.clone(), mode.to_string());
+    let (peer, mode2, ignore, preset) = (pc.name.clone(), mode.to_string(), ignore.to_vec(), preset.to_string());
     tokio::task::spawn_blocking(move || {
-        let r = pack(&n2, &peer, &src, &name, &mode2, &key);
+        let r = pack(&n2, &peer, &src, &name, &mode2, &key, &ignore).map(|mut e| {
+            e["preset"] = json!(preset);
+            e
+        });
         n2.builds.jobs.lock().remove(&key);
         match r {
             Ok(e) => {
@@ -156,18 +310,21 @@ pub fn send(node: &Arc<Node>, peer: &str, src: &str, name: &str, mode: &str) -> 
             }
             Err(e) => {
                 n2.info(&format!("[сборки] «{}» → {}: не упаковалась — {}", name, peer, e));
-                remember(&n2, json!({ "dir": "out", "peer": peer, "name": name, "mode": mode2, "at": time::format(&time::now()), "error": e }));
+                remember(&n2, json!({ "dir": "out", "peer": peer, "name": name, "mode": mode2, "preset": preset, "at": time::format(&time::now()), "error": e }));
             }
         }
     });
     Ok(json!({ "ok": true, "started": true }))
 }
 
-fn pack(node: &Arc<Node>, peer: &str, src: &Path, name: &str, mode: &str, key: &str) -> Result<Value, String> {
-    let ig = node.cfg.read().global_ignore();
-    let files: Vec<_> = bridge_core::scanner::walk(src, &[]).into_iter().filter(|w| ig.which(&w.rel).is_none()).collect();
+fn pack(node: &Arc<Node>, peer: &str, src: &Path, name: &str, mode: &str, key: &str, ignore: &[String]) -> Result<Value, String> {
+    let ig = BuildIgnore::new(node, ignore);
+    let all = bridge_core::scanner::walk(src, &[]);
+    let n_all = all.len();
+    let files: Vec<_> = all.into_iter().filter(|w| ig.which(&w.rel).is_none()).collect();
+    let skipped = n_all - files.len();
     if files.is_empty() {
-        return Err("папка пуста".into());
+        return Err(if skipped > 0 { "всё в папке отсеяно игнором".into() } else { "папка пуста".into() });
     }
     let total = files.len();
     let set_job = |stage: &str, done: usize| {
@@ -236,7 +393,7 @@ fn pack(node: &Arc<Node>, peer: &str, src: &Path, name: &str, mode: &str, key: &
     bridge_core::files::set_mtime(&out, &(time::now() - chrono::Duration::seconds(5)));
     // отпечатки — «что у соседа» после этой отправки
     write(&sf, &json!({ "files": now, "at": time::format(&time::now()) }));
-    Ok(json!({ "dir": "out", "peer": peer, "name": name, "mode": if first && mode == "patch" { "clean" } else { mode }, "at": time::format(&time::now()), "files": pick.len(), "all": now.len(), "bytes": bytes, "zip": zsize, "src": src.display().to_string(), "first": first }))
+    Ok(json!({ "dir": "out", "peer": peer, "name": name, "mode": if first && mode == "patch" { "clean" } else { mode }, "at": time::format(&time::now()), "files": pick.len(), "all": now.len(), "bytes": bytes, "zip": zsize, "src": src.display().to_string(), "first": first, "skipped": skipped }))
 }
 
 // ───────────── приём ─────────────

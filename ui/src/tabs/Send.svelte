@@ -16,6 +16,8 @@
     }
   });
   let sub = $state('');
+  let tab = $state(SET.sendTab === 'builds' ? 'builds' : 'files');
+  function setTab(t: string) { tab = t; setSet('sendTab', t); }
   let filter = $state('');
   type Up = { id: number; path: string; size: number; peer: string; part: number; done: boolean; err: string };
   let ups = $state<Up[]>([]);
@@ -55,6 +57,13 @@
   const shown = $derived(inc.filter(f => !filter || f.path.toLowerCase().includes(filter.toLowerCase())));
 </script>
 
+<div class="vtabs sttabs" role="tablist" aria-label="Отправка" style="margin-bottom:14px">
+  <button role="tab" class:on={tab === 'files'} onclick={() => setTab('files')}><Gi n="up" /> Файлы</button>
+  <button role="tab" class:on={tab === 'builds'} onclick={() => setTab('builds')}><Gi n="folder" /> Сборки</button>
+</div>
+{#if tab === 'builds'}
+<Builds />
+{:else}
 <div class="card">
   <div class="row"><h3 style="margin:0">Отправить файлы</h3><div class="grow"></div>
     <label class="small muted">Кому&nbsp;<select bind:value={peer} onchange={() => setSet('sendPeer', peer)}>
@@ -77,7 +86,6 @@
     {/each}
   </div>
 </div>
-<Builds />
 <div class="split" style="margin-top:14px">
   <div class="card"><div class="row"><h3 style="margin:0">Ждут отправки</h3><div class="grow"></div><button class="b sm" data-open="outgoing"><Gi n="folder" /> Папка</button></div>
     <div style="margin-top:8px">
@@ -103,3 +111,4 @@
 <div class="card" style="margin-top:14px"><h3>История</h3>
   {#if (ui.ov.mailbox.recent || []).length}<table><tbody>{#each ui.ov.mailbox.recent as e}<MailRow {e} />{/each}</tbody></table>{:else}<div class="empty">Пусто</div>{/if}
 </div>
+{/if}
