@@ -30,6 +30,10 @@ export const INV = $state<{ id: string; media: string; text: string; from: strin
 export const R: any = {
   key: null as string | null, title: '', members: [] as string[], voice: true, mic: true, deaf: false, local: null as MediaStream | null,
   pcs: {} as Record<string, any>, mine: {} as Record<string, any>, remote: {} as Record<string, MediaStream>, watching: new Set<string>(), popups: {} as Record<string, Window>,
+  /** (3.8) Показы, которые смотрели и которые закончились: окно и карточка остаются с плашкой «Показ закончился». */
+  ended: {} as Record<string, { n: string; label: string; surf: string; at: number }>,
+  /** Что известно о показах в канале (кто, подпись) — чтобы помнить и после их конца. */
+  seen: {} as Record<string, { n: string; label: string; surf: string }>,
   vol: {} as Record<string, number>, ptt: false, pttDown: false, meters: {} as Record<string, () => number>, forced: '', joinedAt: 0, ac: null as AudioContext | null,
 };
 (window as any).R = R; // отдельному окну показа (assets/popout.html) — оно берёт видео отсюда
@@ -259,7 +263,7 @@ export function roomLeave(quiet = false) {
   if (ROSTER[R.key] && !quiet) delete ROSTER[R.key][ME()];
   if (R.forced) { R.forced = ''; muteIndicate(''); }
   for (const f of leaveHooks) try { f(quiet); } catch {}
-  Object.assign(R, { key: null, title: '', members: [], local: null, pcs: {}, mine: {}, remote: {}, watching: new Set(), popups: {}, meters: {} });
+  Object.assign(R, { key: null, title: '', members: [], local: null, pcs: {}, mine: {}, remote: {}, watching: new Set(), popups: {}, meters: {}, ended: {}, seen: {} });
   CHT.roomConv = '';
   document.querySelectorAll('audio[id^=ra-]').forEach(a => a.remove());
   bump();
@@ -447,17 +451,51 @@ export function popout(id: string, label: string) {
 }
 setInterval(() => {
   let changed = false;
-  for (const [id, w] of Object.entries(R.popups) as [string, Window][]) if (!w || w.closed) { delete R.popups[id]; changed = true; }
+  // окно закрыли — закончившийся показ забыт (кнопка «Закрыть» в окне или крестик)
+  const live = R.key ? liveStreams() : new Set<string>();
+  for (const [id, w] of Object.entries(R.popups) as [string, Window][]) if (!w || w.closed) {
+    delete R.popups[id];
+    // окно закончившегося показа закрыли (даже раньше, чем панель заметила конец) — показ забыт и в панели
+    if (R.ended[id] || !live.has(id)) { delete R.ended[id]; if (R.watching.delete(id)) delete R.remote[id]; }
+    changed = true;
+  }
   if (changed) bump();
 }, 1000);
 function pruneWatching() {
   if (!R.key) return;
   const live = liveStreams();
+  for (const p of rosterOf(R.key)) for (const s of p.st.streams || []) R.seen[s.id] = { n: p.name, label: s.label || '', surf: s.surf || '' };
   let ch = false;
-  for (const id of [...R.watching] as string[]) if (!live.has(id) && !R.remote[id]?.active) { R.watching.delete(id); try { R.popups[id]?.close(); } catch {} delete R.popups[id]; delete R.remote[id]; ch = true; }
+  // смотрели, а показ закончился: не закрываем — окно и карточка показывают «Показ закончился» и кнопку «Закрыть»
+  for (const id of [...R.watching] as string[]) if (!live.has(id) && !R.remote[id]?.active) {
+    R.watching.delete(id); delete R.remote[id];
+    const was = R.seen[id];
+    if (was) R.ended[id] = { ...was, at: Date.now() };
+    else { try { R.popups[id]?.close(); } catch {} delete R.popups[id]; }
+    ch = true;
+  }
+  // тот же человек снова показывает — переключаемся на новый показ сами (окно остаётся тем же)
+  for (const [eid, e] of Object.entries(R.ended) as [string, any][]) {
+    const p = rosterOf(R.key).find(x => x.name === e.n);
+    const cands = ((p && p.st.streams) || []).filter((s: any) => !R.watching.has(s.id) && !R.ended[s.id]);
+    const s = cands.find((x: any) => x.label === e.label) || cands.find((x: any) => e.surf && x.surf === e.surf) || cands[0];
+    if (!s) continue;
+    R.watching.add(s.id);
+    const w = R.popups[eid];
+    delete R.popups[eid]; delete R.ended[eid];
+    if (w && !w.closed) { try { w.location.hash = encodeURIComponent(s.id + '|' + titleOf(e.n) + ': ' + s.label); R.popups[s.id] = w; } catch {} }
+    ch = true;
+  }
+  for (const id of Object.keys(R.seen)) if (!live.has(id) && !R.ended[id] && !R.watching.has(id)) delete R.seen[id];
   if (ch) stateChanged();
 }
-setInterval(pruneWatching, 3000);
+setInterval(pruneWatching, 1500);
+/** Закрыть плашку закончившегося показа (и его окно). */
+export function dismissEnded(id: string) {
+  try { R.popups[id]?.close(); } catch {}
+  delete R.popups[id]; delete R.ended[id];
+  bump();
+}
 export function watchAllOf(n: string) {
   const st = stOf(n);
   for (const s of (st && st.streams) || []) if (!R.watching.has(s.id)) watch(s.id, true);

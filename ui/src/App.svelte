@@ -28,9 +28,10 @@
   import Help from './tabs/Help.svelte';
   import Voice from './voice/Voice.svelte';
   import Apps from './tabs/Apps.svelte';
+  import BuildsTab from './tabs/BuildsTab.svelte';
 
   const NAV: (string | [string, string])[] = [
-    ['home', 'Обзор'], 'Мост', ['peers', 'Соседи'], ['send', 'Отправка'], ['folders', 'Общие папки'], ['shares', 'Пространства'], ['records', 'Записи'],
+    ['home', 'Обзор'], 'Мост', ['peers', 'Соседи'], ['send', 'Отправка'], ['builds', 'Сборки'], ['folders', 'Общие папки'], ['shares', 'Пространства'], ['records', 'Записи'],
     'Связь', ['voice', 'Каналы'], ['apps', 'Приложения'], ['agent', 'Агенты'], ['chat', 'Чаты'], ['assistant', 'Ассистент'], ['phone', 'Телефон'],
     'Настройка', ['settings', 'Настройки'], ['access', 'Права и группы'], ['log', 'Журнал'], ['help', 'Справка'],
   ];
@@ -171,6 +172,7 @@
           {#if ui.tab === 'home'}<Home />
           {:else if ui.tab === 'peers'}<Peers />
           {:else if ui.tab === 'send'}<Send />
+          {:else if ui.tab === 'builds'}<BuildsTab />
           {:else if ui.tab === 'folders'}<Folders />
           {:else if ui.tab === 'shares'}<Shares />
           {:else if ui.tab === 'records'}<Records />

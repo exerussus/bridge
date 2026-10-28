@@ -7,13 +7,14 @@
   import { ago, size, fullTime } from '../lib/util';
   import Gi from './Gi.svelte';
 
-  type Preset = { id: string; name: string; path: string; peers: string[]; mode: 'patch' | 'clean'; ignore: string[] };
+  type Preset = { id: string; name: string; path: string; peers: string[]; mode: 'patch' | 'clean'; ignore: string[]; exe: string };
   const peers = $derived(ui.ov.peers.filter((p: any) => p.enabled && !p.invite));
   let B = $state<any>(null);
   let list = $state<Preset[]>([]);
   let cur = $state(SET.buildCur || '');
   let loaded = false;
   let saveT: any = 0, saved = $state(''), busy = $state(false);
+  let note = $state('');
   let pv = $state<any>(null), pvBusy = $state(false), pvErr = $state(''), pvKey = '';
   let pvT: any = 0;
 
@@ -27,9 +28,9 @@
       B = await api('GET', 'builds');
       if (!loaded) {
         loaded = true;
-        list = (B.presets || []).map((p: any) => ({ ...p, peers: p.peers || [], ignore: p.ignore || [] }));
+        list = (B.presets || []).map((p: any) => ({ ...p, peers: p.peers || [], ignore: p.ignore || [], exe: p.exe || '' }));
         // прежняя одиночная сборка (3.3.1–3.3.4) — первой заготовкой
-        if (!list.length && SET.buildSrc) { list = [{ id: newId(), name: SET.buildName || guess(SET.buildSrc) || 'Сборка', path: SET.buildSrc, peers: SET.buildPeer ? [SET.buildPeer] : [], mode: SET.buildMode === 'clean' ? 'clean' : 'patch', ignore: [] }]; save(); }
+        if (!list.length && SET.buildSrc) { list = [{ id: newId(), name: SET.buildName || guess(SET.buildSrc) || 'Сборка', path: SET.buildSrc, peers: SET.buildPeer ? [SET.buildPeer] : [], mode: SET.buildMode === 'clean' ? 'clean' : 'patch', ignore: [], exe: '' }]; save(); }
         if (!list.some(p => p.id === cur)) cur = list[0]?.id || '';
       }
     } catch {}
@@ -52,7 +53,7 @@
   }
   function edit(f: (p: Preset) => void, refresh = false) { if (!P) return; f(P); save(); if (refresh) previewSoon(); }
   function add() {
-    const p: Preset = { id: newId(), name: 'Новая сборка', path: '', peers: peers[0] ? [peers[0].name] : [], mode: 'patch', ignore: [] };
+    const p: Preset = { id: newId(), name: 'Новая сборка', path: '', peers: peers[0] ? [peers[0].name] : [], mode: 'patch', ignore: [], exe: '' };
     list.push(p); cur = p.id; pv = null; save(true);
   }
   function dup() {
@@ -86,20 +87,14 @@
     busy = true;
     try {
       clearTimeout(saveT); await api('POST', 'builds/presets', { list: $state.snapshot(list) }); saved = 'сохранено';
-      const r = await api('POST', 'builds/send', { preset: P.id, mode });
+      const r = await api('POST', 'builds/send', { preset: P.id, mode, note });
+      note = '';
       toast('Упаковываю «' + P.name + '» для ' + r.started.map(peerTitle).join(', ') + '…');
       if (r.errors?.length) toast(r.errors.join('; '), 'bad');
       B = await api('GET', 'builds');
     } catch (e: any) { toast(e.message, 'bad'); }
     busy = false;
   }
-  async function setTarget(r: any) {
-    const v = prompt('Куда распаковывать сборку «' + r.name + '» от ' + peerTitle(r.peer) + '?\nПолный путь; пусто — по умолчанию (' + B.defaultRoot + ').', r.target);
-    if (v === null) return;
-    try { await api('POST', 'builds/target', { peer: r.peer, name: r.name, path: v.trim() }); toast('Следующая сборка распакуется сюда', 'ok'); B = await api('GET', 'builds'); } catch (e: any) { toast(e.message, 'bad'); }
-  }
-  async function openDir(r: any) { try { await api('POST', 'open?' + new URLSearchParams({ target: 'build', peer: r.peer, name: r.name })); } catch (e: any) { toast(e.message, 'bad'); } }
-
   const mine = (p: Preset, h: any) => h.preset ? h.preset === p.id : h.name === p.name;
   const lastOf = (p: Preset) => (B ? B.history.find((h: any) => h.dir === 'out' && mine(p, h)) : null);
   const jobsOf = (p: Preset) => (B ? B.jobs.filter((j: any) => mine(p, j)) : []);
@@ -132,6 +127,11 @@
         <label class="f">Название<input value={P.name} placeholder={guess(P.path) || 'CORA'} oninput={e => edit(p => { p.name = (e.target as HTMLInputElement).value; })} /></label>
         <label class="f">Папка сборки на этом ПК<input class="mono" value={P.path} placeholder="D:\Unity\CORA\Build" oninput={e => edit(p => { p.path = (e.target as HTMLInputElement).value; if (!p.name || p.name === 'Новая сборка') p.name = guess(p.path) || p.name; }, true)} /></label>
       </div>
+      <label class="f" style="margin-top:10px">Что запускать у получателя <span class="muted">(необязательно — тогда у него будет кнопка «Запустить»)</span>
+        <input class="mono" list="bexes" value={P.exe} placeholder={pv?.exes?.[0] || 'CORA.exe'} oninput={e => edit(p => { p.exe = (e.target as HTMLInputElement).value.trim(); })} />
+        <datalist id="bexes">{#each pv?.exes || [] as x (x)}<option value={x}></option>{/each}</datalist>
+      </label>
+      {#if pv?.exes?.length && !P.exe}<div class="row small" style="gap:6px;flex-wrap:wrap;margin-top:4px"><span class="muted">Нашлось:</span>{#each pv.exes.slice(0, 4) as x (x)}<button class="b sm" onclick={() => edit(p => { p.exe = x; })}>{x}</button>{/each}</div>{/if}
       <div class="f" style="margin-top:10px">Кому
         <div class="pchips">{#each peers as n (n.name)}<label class="pchip" class:on={P.peers.includes(n.name)}><input type="checkbox" checked={P.peers.includes(n.name)} onchange={() => togglePeer(n.name)} />{n.title || n.name}{#if !n.online}<span class="muted"> · нет связи</span>{/if}</label>{/each}</div>
       </div>
@@ -154,7 +154,10 @@
         {:else}<span class="muted">{pvBusy ? 'Считаю, что войдёт в архив…' : 'Укажите папку — покажу, что войдёт в архив и что отсеет игнор.'}</span>{/if}
       </div>
 
-      <div class="row" style="gap:10px;flex-wrap:wrap;margin-top:12px">
+      <label class="f" style="margin-top:12px">Что нового в этой версии <span class="muted">(увидят получатели)</span>
+        <textarea rows="2" class="bnote" placeholder="Например: починил сохранения, новый уровень" bind:value={note} maxlength="2000"></textarea>
+      </label>
+      <div class="row" style="gap:10px;flex-wrap:wrap;margin-top:8px">
         <span class="seg"><button class:on={P.mode === 'patch'} onclick={() => edit(p => { p.mode = 'patch'; })}>Патч — только изменённое</button><button class:on={P.mode === 'clean'} onclick={() => edit(p => { p.mode = 'clean'; })}>Чистая — заменить целиком</button></span>
         <button class="b pri" disabled={busy || !P.peers.length} onclick={() => send(P!.mode)}>Упаковать и отправить</button>
         <span class="small muted">Первая отправка соседу — всегда целиком.</span>
@@ -166,8 +169,10 @@
         <div class="plbl" style="margin-top:12px">Отправки</div>
         {#each hist as h}
           <div class="row small brow"><span class="muted">→ {peerTitle(h.peer)}</span>
+            {#if h.n}<span class="chip">№{h.n}</span>{/if}
             {#if h.error}<span style="color:var(--warn)">{h.error}</span>{:else}<span class="chip">{h.mode === 'clean' ? 'чистая' : 'патч'}</span><span class="muted">{h.files} {h.files === 1 ? 'файл' : 'файлов'} · {size(h.bytes)} → архив {size(h.zip)}{h.skipped ? ' · отсеяно ' + h.skipped : ''}</span>{/if}
             <div class="grow"></div><span class="muted" title={fullTime(h.at)}>{ago(h.at)}</span></div>
+          {#if h.note}<div class="small bnotes">{h.note}</div>{/if}
         {/each}
       {/if}
     {:else}
@@ -175,18 +180,6 @@
     {/if}
   </div>
 </div>
-
-{#if B && B.received.length}
-  <div class="card" style="margin-top:14px"><h3 style="margin:0 0 6px">Принятые сборки</h3>
-    {#each B.received as r}
-      <div class="brow"><div class="row small"><b>{r.name}</b><span class="muted">от {peerTitle(r.peer)}</span>
-        {#if r.error}<span style="color:var(--warn)">{r.error}</span>{:else}<span class="chip">{r.mode === 'clean' ? 'чистая' : 'патч'}</span><span class="muted">{r.files} файлов · {size(r.bytes)}</span>{/if}
-        <div class="grow"></div><span class="muted" title={fullTime(r.at)}>{ago(r.at)}</span>
-        <button class="b sm" onclick={() => openDir(r)}><Gi n="folder" /> Открыть</button><button class="b sm" onclick={() => setTarget(r)}>Куда…</button></div>
-        <div class="small muted mono">{r.target}</div></div>
-    {/each}
-  </div>
-{/if}
 
 <style>
   .bwrap { display: grid; grid-template-columns: minmax(220px, 300px) 1fr; gap: 14px; align-items: start; }
@@ -204,4 +197,6 @@
   .brow { padding: 6px 0; border-top: 1px solid var(--line); gap: 8px; }
   .svd { min-width: 70px; text-align: right; }
   code { font-size: 12px; }
+  .bnote { width: 100%; box-sizing: border-box; resize: vertical; font: inherit; }
+  .bnotes { white-space: pre-wrap; color: var(--muted, #A3A7CC); padding: 0 0 4px 12px; }
 </style>

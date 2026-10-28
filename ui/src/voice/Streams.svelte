@@ -2,7 +2,7 @@
   // Показы в канале: свои (кто смотрит, остановить) и чужие (смотреть, отдельное окно, во весь экран, пометки, управление).
   import { titleOf, SET } from '../lib/state.svelte';
   import { popover } from '../lib/pop';
-  import { R, V, rosterOf, watch, popout, shareStop } from './engine.svelte';
+  import { R, V, rosterOf, watch, popout, shareStop, dismissEnded } from './engine.svelte';
   import { SX, setMode, clearMine, release, decorate, streamVol, setStreamVol, scrKeys, keyName } from './screen.svelte';
   import { setSink } from '../lib/audio';
   import Gi from '../components/Gi.svelte';
@@ -14,7 +14,8 @@
     const mine = Object.entries(R.mine).map(([id, S]: [string, any]) => ({ id, label: S.label, stream: S.stream, viewers: people.filter(p => (p.st.watching || []).includes(id)).map(p => titleOf(p.name)) }));
     const list: any[] = [];
     for (const p of people) for (const s of p.st.streams || []) list.push({ n: p.name, ...s, watching: R.watching.has(s.id), media: R.remote[s.id] || null, popped: !!R.popups[s.id] });
-    return { mine, list };
+    const ended = Object.entries(R.ended).map(([id, e]: [string, any]) => ({ id, ...e, popped: !!R.popups[id] }));
+    return { mine, list, ended };
   });
   function src(node: HTMLVideoElement, s: MediaStream | null) {
     const set = (x: MediaStream | null) => { if (node.srcObject !== x) { node.srcObject = x; node.muted = node.dataset.mine ? true : R.deaf; if (!node.dataset.mine && node.dataset.sid) node.volume = streamVol(node.dataset.sid); node.play().catch(() => {}); if (!node.dataset.mine) setSink(node); } };
@@ -45,8 +46,18 @@
     </div>
   {/each}
 </div>
-<div class="empty" class:hide={data.list.length > 0}>Никто ничего не показывает</div>
+<div class="empty" class:hide={data.list.length > 0 || data.ended.length > 0}>Никто ничего не показывает</div>
 <div class="streams">
+  {#each data.ended as e (e.id)}
+    <div class="stream ended" data-stream={e.id}>
+      <div class="row"><b><Gi n="screen" /> {titleOf(e.n)}</b><span class="small muted">{e.label}</span></div>
+      <div class="endbox">
+        <div class="endt">Показ закончился</div>
+        <div class="small muted">{e.popped ? 'Окно показа тоже ждёт. ' : ''}Если {titleOf(e.n)} снова начнёт показ, он откроется здесь сам.</div>
+        <button class="b pri" style="min-width:140px" onclick={() => dismissEnded(e.id)}>Закрыть</button>
+      </div>
+    </div>
+  {/each}
   {#each data.list as s (s.id)}
     {@const mode = SX.mode[s.id] || ''}
     {@const ctlMine = SX.cv.stream === s.id}
@@ -94,3 +105,8 @@
     </div>
   {/each}
 </div>
+
+<style>
+  .endbox { min-height: 220px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; border-radius: 12px; background: rgba(0,0,0,.35); margin-top: 8px; padding: 20px; }
+  .endt { font-size: 18px; font-weight: 600; }
+</style>

@@ -2,17 +2,18 @@
 import type { Component } from 'svelte';
 import { api, app } from './api';
 
-export const TABS = ['home', 'peers', 'send', 'folders', 'shares', 'records', 'voice', 'apps', 'chat', 'agent', 'assistant', 'phone', 'settings', 'access', 'log', 'help'] as const;
+export const TABS = ['home', 'peers', 'send', 'builds', 'folders', 'shares', 'records', 'voice', 'apps', 'chat', 'agent', 'assistant', 'phone', 'settings', 'access', 'log', 'help'] as const;
 export type Tab = (typeof TABS)[number];
 
 export const TONE: Record<string, string> = {
-  home: 'cyan', peers: 'cyan', send: 'green', folders: 'green', shares: 'green', records: 'amber', voice: 'red', apps: 'amber', chat: 'red', agent: 'amber',
+  home: 'cyan', peers: 'cyan', send: 'green', builds: 'green', folders: 'green', shares: 'green', records: 'amber', voice: 'red', apps: 'amber', chat: 'red', agent: 'amber',
   assistant: 'cyan', phone: 'cyan', settings: 'dim', access: 'amber', log: 'dim', help: 'dim',
 };
 export const HEAD: Record<string, [string, string]> = {
   home: ['Обзор', 'Что происходит на этом ПК и у соседей.'],
   peers: ['Соседи', 'ПК, с которыми работает мост: связь, адреса, проверка.'],
   send: ['Отправка', 'Переслать файлы соседу: положили — он получил.'],
+  builds: ['Сборки', 'Программы и игры между ПК: новая версия одной кнопкой, у получателя — история версий и запуск.'],
   folders: ['Общие папки', 'Одна папка на нескольких ПК. У кого доступ — меняет у всех.'],
   shares: ['Пространства', 'Рабочие папки проектов с записями и правилами приёма.'],
   records: ['Записи', 'Задачи, обсуждения и команды между ПК.'],

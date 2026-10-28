@@ -5,7 +5,6 @@
   import Drop from '../components/Drop.svelte';
   import MailRow from '../components/MailRow.svelte';
   import Gi from '../components/Gi.svelte';
-  import Builds from '../components/Builds.svelte';
 
   const peers = $derived(ui.ov.peers.filter((p: any) => p.enabled));
   let peer = $state('');
@@ -16,8 +15,6 @@
     }
   });
   let sub = $state('');
-  let tab = $state(SET.sendTab === 'builds' ? 'builds' : 'files');
-  function setTab(t: string) { tab = t; setSet('sendTab', t); }
   let filter = $state('');
   type Up = { id: number; path: string; size: number; peer: string; part: number; done: boolean; err: string };
   let ups = $state<Up[]>([]);
@@ -57,13 +54,6 @@
   const shown = $derived(inc.filter(f => !filter || f.path.toLowerCase().includes(filter.toLowerCase())));
 </script>
 
-<div class="vtabs sttabs" role="tablist" aria-label="Отправка" style="margin-bottom:14px">
-  <button role="tab" class:on={tab === 'files'} onclick={() => setTab('files')}><Gi n="up" /> Файлы</button>
-  <button role="tab" class:on={tab === 'builds'} onclick={() => setTab('builds')}><Gi n="folder" /> Сборки</button>
-</div>
-{#if tab === 'builds'}
-<Builds />
-{:else}
 <div class="card">
   <div class="row"><h3 style="margin:0">Отправить файлы</h3><div class="grow"></div>
     <label class="small muted">Кому&nbsp;<select bind:value={peer} onchange={() => setSet('sendPeer', peer)}>
@@ -111,4 +101,3 @@
 <div class="card" style="margin-top:14px"><h3>История</h3>
   {#if (ui.ov.mailbox.recent || []).length}<table><tbody>{#each ui.ov.mailbox.recent as e}<MailRow {e} />{/each}</tbody></table>{:else}<div class="empty">Пусто</div>{/if}
 </div>
-{/if}

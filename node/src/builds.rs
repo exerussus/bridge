@@ -27,6 +27,37 @@ pub struct Builds {
     /// Что сейчас упаковывается: ключ «сосед/имя» → ход.
     pub jobs: Mutex<BTreeMap<String, Value>>,
     lock: Mutex<()>,
+    /// (3.8) Запущенные присланные программы: «сосед/имя» → процесс.
+    runs: Mutex<BTreeMap<String, std::process::Child>>,
+}
+
+/// Что запускать в сборке: путь внутри папки сборки (без «..» и абсолютных), пусто — ничего.
+pub fn clean_exe(p: &str) -> Result<String, String> {
+    let p = p.trim().replace('\\', "/");
+    let p = p.trim_start_matches("./");
+    if p.is_empty() {
+        return Ok(String::new());
+    }
+    if p.chars().count() > 300 {
+        return Err("путь программы — до 300 знаков".into());
+    }
+    path::norm(p).ok_or_else(|| "программа — путь внутри папки сборки (например, CORA.exe или bin/Game.exe)".to_string())
+}
+
+/// Похожее на запускаемое в папке сборки (для подсказки в заготовке).
+fn exe_candidates(src: &Path, ig: &BuildIgnore) -> Vec<String> {
+    let mut v: Vec<String> = bridge_core::scanner::walk(src, &[])
+        .into_iter()
+        .filter(|w| ig.which(&w.rel).is_none() && w.rel.split('/').count() <= 3)
+        .map(|w| w.rel)
+        .filter(|r| {
+            let l = r.to_lowercase();
+            (l.ends_with(".exe") || l.ends_with(".x86_64") || l.ends_with(".sh") || l.ends_with(".bat") || l.ends_with(".cmd")) && !l.contains("unitycrashhandler") && !l.contains("/monobleedingedge/")
+        })
+        .collect();
+    v.sort_by_key(|r| (r.matches('/').count(), r.to_lowercase()));
+    v.truncate(20);
+    v
 }
 
 fn dir(node: &Node) -> PathBuf {
@@ -135,6 +166,7 @@ pub fn set_presets(node: &Node, list: &Value) -> Result<Vec<Value>, String> {
             }
         }
         let mode = if p["mode"] == "clean" { "clean" } else { "patch" };
+        let exe = clean_exe(p["exe"].as_str().unwrap_or("")).map_err(|e| format!("«{}»: {}", name, e))?;
         let ignore: Vec<String> = lines_of(&p["ignore"]).into_iter().map(|l| l.trim_end().to_string()).collect();
         if ignore.len() > 500 {
             return Err(format!("«{}»: в игноре не больше 500 строк", name));
@@ -143,7 +175,7 @@ pub fn set_presets(node: &Node, list: &Value) -> Result<Vec<Value>, String> {
         if let Some(e) = bridge_core::ignore::validate(&pats, &format!("игнор «{}»", name)).into_iter().next() {
             return Err(e);
         }
-        out.push(json!({ "id": id, "name": name, "path": path, "peers": peers, "mode": mode, "ignore": ignore }));
+        out.push(json!({ "id": id, "name": name, "path": path, "peers": peers, "mode": mode, "ignore": ignore, "exe": exe }));
     }
     drop(cfg);
     write(&presets_file(node), &json!(out));
@@ -179,11 +211,11 @@ pub fn preview(node: &Node, src: &str, ignore: &[String]) -> Result<Value, Strin
     let mut rules: Vec<Value> = by.into_iter().map(|(r, (n, b, ex))| json!({ "rule": r, "files": n, "bytes": b, "example": ex })).collect();
     rules.sort_by(|a, b| b["bytes"].as_i64().cmp(&a["bytes"].as_i64()));
     let (ign_f, ign_b) = rules.iter().fold((0i64, 0i64), |a, r| (a.0 + r["files"].as_i64().unwrap_or(0), a.1 + r["bytes"].as_i64().unwrap_or(0)));
-    Ok(json!({ "files": files, "bytes": bytes, "ignoredFiles": ign_f, "ignoredBytes": ign_b, "rules": rules, "biggest": biggest.into_iter().take(8).map(|(s, p)| json!({ "path": p, "bytes": s })).collect::<Vec<_>>() }))
+    Ok(json!({ "files": files, "bytes": bytes, "ignoredFiles": ign_f, "ignoredBytes": ign_b, "rules": rules, "biggest": biggest.into_iter().take(8).map(|(s, p)| json!({ "path": p, "bytes": s })).collect::<Vec<_>>(), "exes": exe_candidates(&src, &ig) }))
 }
 
 /// Отправить по заготовке всем её получателям.
-pub fn send_preset(node: &Arc<Node>, id: &str, mode: Option<&str>) -> Result<Value, (u16, String)> {
+pub fn send_preset(node: &Arc<Node>, id: &str, mode: Option<&str>, note: &str) -> Result<Value, (u16, String)> {
     let p = preset(node, id).ok_or((404, "нет такой заготовки".to_string()))?;
     let peers: Vec<String> = p["peers"].as_array().cloned().unwrap_or_default().iter().filter_map(|x| x.as_str().map(String::from)).collect();
     if peers.is_empty() {
@@ -193,7 +225,7 @@ pub fn send_preset(node: &Arc<Node>, id: &str, mode: Option<&str>) -> Result<Val
     let ignore = lines_of(&p["ignore"]);
     let (mut ok, mut errs) = (Vec::new(), Vec::new());
     for peer in &peers {
-        match send_ex(node, peer, p["path"].as_str().unwrap_or(""), p["name"].as_str().unwrap_or(""), &mode, &ignore, id) {
+        match send_full(node, peer, p["path"].as_str().unwrap_or(""), p["name"].as_str().unwrap_or(""), &mode, &ignore, id, p["exe"].as_str().unwrap_or(""), note) {
             Ok(_) => ok.push(peer.clone()),
             Err((_, e)) => errs.push(format!("{}: {}", peer, e)),
         }
@@ -253,15 +285,27 @@ pub fn status(node: &Node) -> Value {
         let k = format!("{}/{}", e["peer"].as_str().unwrap_or(""), e["name"].as_str().unwrap_or(""));
         recv.insert(k, e.clone());
     }
-    let received: Vec<Value> = recv
+    let all_in: Vec<Value> = h.as_array().cloned().unwrap_or_default().into_iter().filter(|e| e["dir"] == "in").collect();
+    let mut received: Vec<Value> = recv
         .values()
         .map(|e| {
             let (p, n) = (e["peer"].as_str().unwrap_or(""), e["name"].as_str().unwrap_or(""));
             let mut e = e.clone();
-            e["target"] = json!(target_dir(node, p, n).display().to_string());
+            let target = target_dir(node, p, n);
+            e["target"] = json!(target.display().to_string());
+            // история версий этой сборки (новые — первыми) и что запускать (из последней удачной)
+            let hist: Vec<Value> = all_in.iter().filter(|x| x["peer"] == p && x["name"] == n).rev().take(30).cloned().collect();
+            let last_ok = hist.iter().find(|x| x["error"].is_null());
+            let exe = last_ok.and_then(|x| x["exe"].as_str()).unwrap_or("").to_string();
+            e["exe"] = json!(exe);
+            e["exeExists"] = json!(!exe.is_empty() && path::to_local(&target, &exe).map(|f| f.is_file()).unwrap_or(false));
+            e["lastOk"] = last_ok.cloned().unwrap_or(Value::Null);
+            e["history"] = json!(hist);
+            e["running"] = json!(running(node, p, n));
             e
         })
         .collect();
+    received.sort_by(|a, b| b["at"].as_str().unwrap_or("").cmp(a["at"].as_str().unwrap_or("")));
     json!({
         "history": h.as_array().cloned().unwrap_or_default().into_iter().rev().take(50).collect::<Vec<_>>(),
         "received": received,
@@ -269,6 +313,78 @@ pub fn status(node: &Node) -> Value {
         "presets": presets(node),
         "defaultRoot": node.base_dir.join("сборки").display().to_string(),
     })
+}
+
+// ───────────── запуск присланного ─────────────
+
+fn run_key(peer: &str, name: &str) -> String {
+    format!("{}/{}", peer.to_lowercase(), name)
+}
+
+pub fn running(node: &Node, peer: &str, name: &str) -> bool {
+    let mut g = node.builds.runs.lock();
+    let k = run_key(peer, name);
+    match g.get_mut(&k).map(|c| c.try_wait()) {
+        Some(Ok(None)) => true,
+        Some(_) => {
+            g.remove(&k);
+            false
+        }
+        None => false,
+    }
+}
+
+/// Запустить программу присланной сборки (то, что указал отправитель). Только с этого ПК, по нажатию человека.
+pub fn run(node: &Node, peer: &str, name: &str) -> Result<Value, String> {
+    if let Some(g) = node.remote.active() {
+        return Err(format!("пока этим ПК управляет {}, программы не запускаются", g.peer));
+    }
+    let name = clean_name(name)?;
+    if running(node, peer, &name) {
+        return Ok(json!({ "ok": true, "already": true }));
+    }
+    let st = status(node);
+    let r = st["received"].as_array().and_then(|a| a.iter().find(|x| eq_ic(x["peer"].as_str().unwrap_or(""), peer) && x["name"] == name.as_str()).cloned()).ok_or("такой сборки здесь нет")?;
+    let exe = r["exe"].as_str().unwrap_or("");
+    if exe.is_empty() {
+        return Err("отправитель не указал, что запускать".into());
+    }
+    let target = target_dir(node, peer, &name);
+    let full = path::to_local(&target, exe).map_err(|_| "программа вне папки сборки".to_string())?;
+    if !full.is_file() {
+        return Err(format!("нет файла «{}» в папке сборки", exe));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&full, std::fs::Permissions::from_mode(0o755));
+    }
+    let child = std::process::Command::new(&full)
+        .current_dir(full.parent().unwrap_or(&target))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("не запустилось «{}»: {}", exe, e))?;
+    let pid = child.id();
+    node.builds.runs.lock().insert(run_key(peer, &name), child);
+    node.info(&format!("[сборки] запущено «{}» из сборки «{}» от {} (pid {})", exe, name, peer, pid));
+    node.emit("builds", json!({}));
+    Ok(json!({ "ok": true, "pid": pid }))
+}
+
+pub fn stop(node: &Node, peer: &str, name: &str) -> Result<Value, String> {
+    let c = node.builds.runs.lock().remove(&run_key(peer, name));
+    match c {
+        Some(mut c) => {
+            let _ = c.kill();
+            let _ = c.wait();
+            node.info(&format!("[сборки] остановлено: сборка «{}» от {}", name, peer));
+            node.emit("builds", json!({}));
+            Ok(json!({ "ok": true }))
+        }
+        None => Ok(json!({ "ok": true, "already": true })),
+    }
 }
 
 // ───────────── отправка ─────────────
@@ -279,6 +395,14 @@ pub fn send(node: &Arc<Node>, peer: &str, src: &str, name: &str, mode: &str) -> 
 }
 
 pub fn send_ex(node: &Arc<Node>, peer: &str, src: &str, name: &str, mode: &str, ignore: &[String], preset: &str) -> Result<Value, (u16, String)> {
+    send_full(node, peer, src, name, mode, ignore, preset, "", "")
+}
+
+/// Отправка с программой для запуска (`exe` — путь внутри сборки) и заметкой «что нового» (до 2000 знаков).
+#[allow(clippy::too_many_arguments)]
+pub fn send_full(node: &Arc<Node>, peer: &str, src: &str, name: &str, mode: &str, ignore: &[String], preset: &str, exe: &str, note: &str) -> Result<Value, (u16, String)> {
+    let exe = clean_exe(exe).map_err(|e| (400, e))?;
+    let note: String = note.trim().chars().take(2000).collect();
     let pc = node.cfg.read().peer(peer).cloned().ok_or((404, format!("нет соседа «{}»", peer)))?;
     let name = clean_name(name).map_err(|e| (400, e))?;
     if mode != "patch" && mode != "clean" {
@@ -296,7 +420,7 @@ pub fn send_ex(node: &Arc<Node>, peer: &str, src: &str, name: &str, mode: &str, 
     let n2 = node.clone();
     let (peer, mode2, ignore, preset) = (pc.name.clone(), mode.to_string(), ignore.to_vec(), preset.to_string());
     tokio::task::spawn_blocking(move || {
-        let r = pack(&n2, &peer, &src, &name, &mode2, &key, &ignore).map(|mut e| {
+        let r = pack(&n2, &peer, &src, &name, &mode2, &key, &ignore, &exe, &note).map(|mut e| {
             e["preset"] = json!(preset);
             e
         });
@@ -317,7 +441,8 @@ pub fn send_ex(node: &Arc<Node>, peer: &str, src: &str, name: &str, mode: &str, 
     Ok(json!({ "ok": true, "started": true }))
 }
 
-fn pack(node: &Arc<Node>, peer: &str, src: &Path, name: &str, mode: &str, key: &str, ignore: &[String]) -> Result<Value, String> {
+#[allow(clippy::too_many_arguments)]
+fn pack(node: &Arc<Node>, peer: &str, src: &Path, name: &str, mode: &str, key: &str, ignore: &[String], exe: &str, note: &str) -> Result<Value, String> {
     let ig = BuildIgnore::new(node, ignore);
     let all = bridge_core::scanner::walk(src, &[]);
     let n_all = all.len();
@@ -344,7 +469,10 @@ fn pack(node: &Arc<Node>, peer: &str, src: &Path, name: &str, mode: &str, key: &
         }
     }
     let sf = sent_file(node, peer, name);
-    let prev: BTreeMap<String, String> = serde_json::from_value(read(&sf)["files"].clone()).unwrap_or_default();
+    let prev_v = read(&sf);
+    let prev: BTreeMap<String, String> = serde_json::from_value(prev_v["files"].clone()).unwrap_or_default();
+    // номер версии этой сборки для этого соседа (растёт с каждой отправкой)
+    let n = prev_v["n"].as_u64().unwrap_or(0) + 1;
     let first = prev.is_empty();
     let pick: Vec<_> = files.iter().filter(|w| mode == "clean" || first || prev.get(&w.rel) != now.get(&w.rel)).collect();
     if pick.is_empty() {
@@ -362,7 +490,7 @@ fn pack(node: &Arc<Node>, peer: &str, src: &Path, name: &str, mode: &str, key: &
         let f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
         let mut z = zip::ZipWriter::new(std::io::BufWriter::new(f));
         let opt = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated).compression_level(Some(3)).large_file(true);
-        let meta = json!({ "name": name, "mode": mode, "from": node.node_name(), "at": time::format(&time::now()), "files": pick.len(), "all": now.len(), "first": first });
+        let meta = json!({ "name": name, "mode": mode, "from": node.node_name(), "at": time::format(&time::now()), "files": pick.len(), "all": now.len(), "first": first, "exe": exe, "note": note, "n": n });
         z.start_file(META, opt).map_err(|e| e.to_string())?;
         z.write_all(meta.to_string().as_bytes()).map_err(|e| e.to_string())?;
         let mut buf = vec![0u8; 1 << 20];
@@ -392,8 +520,8 @@ fn pack(node: &Arc<Node>, peer: &str, src: &Path, name: &str, mode: &str, key: &
     bridge_core::files::move_replace(&tmp, &out).map_err(|e| e.to_string())?;
     bridge_core::files::set_mtime(&out, &(time::now() - chrono::Duration::seconds(5)));
     // отпечатки — «что у соседа» после этой отправки
-    write(&sf, &json!({ "files": now, "at": time::format(&time::now()) }));
-    Ok(json!({ "dir": "out", "peer": peer, "name": name, "mode": if first && mode == "patch" { "clean" } else { mode }, "at": time::format(&time::now()), "files": pick.len(), "all": now.len(), "bytes": bytes, "zip": zsize, "src": src.display().to_string(), "first": first, "skipped": skipped }))
+    write(&sf, &json!({ "files": now, "at": time::format(&time::now()), "n": n }));
+    Ok(json!({ "dir": "out", "peer": peer, "name": name, "mode": if first && mode == "patch" { "clean" } else { mode }, "at": time::format(&time::now()), "files": pick.len(), "all": now.len(), "bytes": bytes, "zip": zsize, "src": src.display().to_string(), "first": first, "skipped": skipped, "exe": exe, "note": note, "n": n }))
 }
 
 // ───────────── приём ─────────────
@@ -485,5 +613,7 @@ fn install(node: &Arc<Node>, peer: &str, zipf: &Path, name: &str) -> Result<Valu
         bridge_core::files::move_replace(&tmp, &dest).map_err(|e| format!("{}: {} (файл занят? закройте программу)", norm, e))?;
         files += 1;
     }
-    Ok(json!({ "dir": "in", "peer": peer, "name": name, "mode": mode, "at": time::format(&time::now()), "files": files, "bytes": bytes, "target": target.display().to_string(), "old": old, "sentAt": meta["at"] }))
+    let exe = clean_exe(meta["exe"].as_str().unwrap_or("")).unwrap_or_default();
+    let note: String = meta["note"].as_str().unwrap_or("").chars().take(2000).collect();
+    Ok(json!({ "dir": "in", "peer": peer, "name": name, "mode": mode, "at": time::format(&time::now()), "files": files, "bytes": bytes, "target": target.display().to_string(), "old": old, "sentAt": meta["at"], "exe": exe, "note": note, "n": meta["n"] }))
 }

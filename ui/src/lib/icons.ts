@@ -2,6 +2,7 @@
 // в готовом HTML (справка, markdown) эмодзи заменяет действие glyphs.
 
 export const GI: Record<string, string> = {
+  box: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/>',
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   trash: '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/>',
   pulse: '<path d="M3 12h4l2-5 4 10 2-5h6"/>',
@@ -53,6 +54,7 @@ export const TAB_ICONS: Record<string, string> = {
   home: '<path d="M4 11l8-6 8 6v8a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1z"/>',
   peers: GI.users,
   send: '<path d="M4 12l16-7-6 16-3-7z"/><path d="M11 14l9-9"/>',
+  builds: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/>',
   folders: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M8 13h8"/>',
   shares: GI.layers,
   records: GI.list,

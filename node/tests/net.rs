@@ -1743,21 +1743,26 @@ async fn build_presets_ignore() {
     std::fs::write(src.join("Game_Data/Managed/Keep.pdb"), b"keep").unwrap();
     std::fs::write(src.join("Game_BurstDebugInformation_DoNotShip/x/big.bin"), vec![0u8; 5000]).unwrap();
     std::fs::write(src.join("Cache/a/b/c.dat"), b"c").unwrap();
+    std::fs::write(src.join("run.sh"), "#!/bin/sh\necho запущено > ran.txt\nsleep 3\n").unwrap();
     let ign = json!(["# кэш", "Cache/", "*_BurstDebugInformation_DoNotShip/", "**/*.pdb", "!Keep.pdb"]);
+    assert!(bridge_node::builds::set_presets(&dev, &json!([{ "id": "x", "name": "X", "path": "", "peers": [], "exe": "../evil.exe" }])).is_err(), "программа — только внутри сборки");
     assert!(bridge_node::builds::set_presets(&dev, &json!([{ "id": "bad id", "name": "X", "path": "", "peers": [] }])).is_err());
-    let l = bridge_node::builds::set_presets(&dev, &json!([{ "id": "cora", "name": "CORA2", "path": src.to_str().unwrap(), "peers": ["STAND"], "mode": "patch", "ignore": ign }])).unwrap();
+    let l = bridge_node::builds::set_presets(&dev, &json!([{ "id": "cora", "name": "CORA2", "path": src.to_str().unwrap(), "peers": ["STAND"], "mode": "patch", "ignore": ign, "exe": "run.sh" }])).unwrap();
+    assert_eq!(l[0]["exe"], "run.sh");
     assert_eq!(l[0]["peers"], json!(["stand"]), "имя соседа — как в настройках");
     let pv = bridge_node::builds::preview(&dev, src.to_str().unwrap(), &ign.as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_string()).collect::<Vec<_>>()).unwrap();
-    assert_eq!(pv["files"], 3, "войдут exe, dll и Keep.pdb: {}", pv);
+    assert_eq!(pv["files"], 4, "войдут exe, sh, dll и Keep.pdb: {}", pv);
     assert_eq!(pv["ignoredFiles"], 3, "{}", pv);
+    assert_eq!(pv["exes"], json!(["Game.exe", "run.sh"]), "подсказка, что запускать: {}", pv);
     assert_eq!(pv["rules"][0]["rule"], "*_BurstDebugInformation_DoNotShip/", "крупнейшее правило первым: {}", pv);
-    let r = bridge_node::builds::send_preset(&dev, "cora", None).unwrap();
+    let r = bridge_node::builds::send_preset(&dev, "cora", None, "  починил сохранения  ").unwrap();
     assert_eq!(r["started"], json!(["stand"]));
     for _ in 0..100 { if dev.builds.jobs.lock().is_empty() && !bridge_node::builds::status(&dev)["history"].as_array().unwrap().is_empty() { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
     let h = bridge_node::builds::status(&dev)["history"][0].clone();
-    assert_eq!(h["files"], 3, "{}", h);
+    assert_eq!(h["files"], 4, "{}", h);
     assert_eq!(h["skipped"], 3);
     assert_eq!(h["preset"], "cora");
+    assert_eq!((h["n"].clone(), h["note"].clone()), (json!(1), json!("починил сохранения")));
     net.sync(1, &["stand"]).await;
     let target = stand.base_dir.join("сборки").join("CORA2");
     for _ in 0..100 { if target.join("Game.exe").exists() { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
@@ -1765,6 +1770,30 @@ async fn build_presets_ignore() {
     assert!(!target.join("Game_Data/Managed/A.pdb").exists());
     assert!(!target.join("Cache").exists() && !target.join("Game_BurstDebugInformation_DoNotShip").exists());
     assert_eq!(bridge_node::builds::presets(&dev).len(), 1);
+    // (3.8) у получателя: версия, что нового, что запускать — и запуск
+    let mut got = json!(null);
+    for _ in 0..100 { got = bridge_node::builds::status(&stand)["received"][0].clone(); if got["exe"] == "run.sh" { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    assert_eq!((got["n"].clone(), got["note"].clone(), got["exe"].clone(), got["exeExists"].clone()), (json!(1), json!("починил сохранения"), json!("run.sh"), json!(true)), "{}", got);
+    assert!(bridge_node::builds::run(&stand, "dev", "Нет такой").is_err());
+    #[cfg(unix)]
+    {
+        bridge_node::builds::run(&stand, "dev", "CORA2").unwrap();
+        for _ in 0..50 { if target.join("ran.txt").exists() { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+        assert!(target.join("ran.txt").exists(), "программа сборки запустилась в её папке");
+        assert!(bridge_node::builds::running(&stand, "dev", "CORA2"));
+        assert_eq!(bridge_node::builds::run(&stand, "dev", "CORA2").unwrap()["already"], true);
+        bridge_node::builds::stop(&stand, "dev", "CORA2").unwrap();
+        assert!(!bridge_node::builds::running(&stand, "dev", "CORA2"));
+    }
+    // вторая версия — №2, история у получателя
+    std::fs::write(src.join("Game_Data/Managed/A.dll"), b"a2").unwrap();
+    bridge_node::builds::send_preset(&dev, "cora", None, "второй патч").unwrap();
+    for _ in 0..100 { if dev.builds.jobs.lock().is_empty() && bridge_node::builds::status(&dev)["history"][0]["n"] == 2 { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    net.sync(1, &["stand"]).await;
+    for _ in 0..100 { got = bridge_node::builds::status(&stand)["received"][0].clone(); if got["n"] == 2 { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    assert_eq!((got["n"].clone(), got["note"].clone(), got["mode"].clone()), (json!(2), json!("второй патч"), json!("patch")), "{}", got);
+    assert_eq!(got["history"].as_array().unwrap().len(), 2);
+    assert_eq!(got["history"][1]["note"], "починил сохранения");
     net.stop().await;
 }
 

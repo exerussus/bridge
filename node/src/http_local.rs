@@ -95,6 +95,8 @@ pub fn routes() -> Router<Arc<Node>> {
         .route(&l("builds/target"), post(builds_target))
         .route(&l("builds/presets"), get(|State(n): St| async move { ok_json(&json!({ "list": crate::builds::presets(&n) })) }).post(builds_presets))
         .route(&l("builds/preview"), post(builds_preview))
+        .route(&l("builds/run"), post(|State(n): St, Json(v): Json<Value>| async move { match crate::builds::run(&n, v["peer"].as_str().unwrap_or(""), v["name"].as_str().unwrap_or("")) { Ok(v) => ok_json(&v), Err(e) => err(400, e) } }))
+        .route(&l("builds/stop"), post(|State(n): St, Json(v): Json<Value>| async move { match crate::builds::stop(&n, v["peer"].as_str().unwrap_or(""), v["name"].as_str().unwrap_or("")) { Ok(v) => ok_json(&v), Err(e) => err(400, e) } }))
         .route(&l("mailbox/cancel"), post(mailbox_cancel))
         .route(&l("mailbox/incoming"), get(mailbox_incoming))
         .route(&l("mailbox/incoming/file"), get(mailbox_incoming_file))
@@ -1059,7 +1061,7 @@ async fn builds_preview(State(node): St, Json(v): Json<Value>) -> Response {
 async fn builds_send(State(node): St, Json(v): Json<Value>) -> Response {
     let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
     if !s("preset").is_empty() {
-        return match crate::builds::send_preset(&node, &s("preset"), Some(&s("mode"))) {
+        return match crate::builds::send_preset(&node, &s("preset"), Some(&s("mode")), &s("note")) {
             Ok(r) => ok_json(&r),
             Err((c, e)) => err(c, e),
         };
