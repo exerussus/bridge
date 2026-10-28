@@ -10,6 +10,7 @@
   import Av from '../components/Av.svelte';
   import TileEditor from './TileEditor.svelte';
   import IdentityKey from '../components/IdentityKey.svelte';
+  import AppsSettings from '../components/AppsSettings.svelte';
   import { SCR_TOOLS, SCR_KEYS_DEF, scrKeys, keyName as scrKeyName } from '../voice/screen.svelte';
   let bindWait = $state('');
   function bindKey(e: KeyboardEvent, k: string) {
@@ -23,7 +24,7 @@
     setSet('scrKeys', next); bindWait = '';
   }
 
-  const TABS: [string, string][] = [['tile', 'Плитка и аватарка'], ['audio', 'Звук и микрофон'], ['signals', 'Сигналы и пинг'], ['share', 'Показ экрана'], ['board', 'Доска'], ['key', 'Ключ'], ['look', 'Вид']];
+  const TABS: [string, string][] = [['tile', 'Плитка и аватарка'], ['audio', 'Звук и микрофон'], ['signals', 'Сигналы и пинг'], ['share', 'Показ экрана'], ['board', 'Доска'], ['key', 'Ключ'], ['apps', 'Приложения'], ['look', 'Вид']];
   let mics = $state<MediaDeviceInfo[]>([]);
   let outs = $state<MediaDeviceInfo[]>([]);
   let labels = $state(true);
@@ -160,6 +161,8 @@
     </div>
   {:else if ui.stTab === 'key'}
     <IdentityKey />
+  {:else if ui.stTab === 'apps'}
+    <AppsSettings />
   {:else if ui.stTab === 'board'}
     <div class="card"><h3>Доска</h3>
       <div class="setrow"><span>Синхронизация</span><Seg k="bSync" opts={[[16, 'сразу'], [50, '20/с'], [100, '10/с'], [250, '4/с']]} /><span></span></div>

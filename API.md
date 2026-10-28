@@ -278,7 +278,7 @@ requests.post(B + "ui", json={"action": "join", "channel": "Семья"}, header
 - `actions [{id, title, run, params: [{id, title, type: text|number|select, options, default}], confirm}]` — кнопки; `run` — программа из пакета и аргументы, `{параметр}` подставляется отдельным аргументом, без оболочки; до 2 минут, вывод до 64 КБ;
 - `permissions`: `files.pick`, `files.save`, `files.read`, `notify`, `channel.post`, `peers`, `mail.send`, `sessions`, `activity`, `input.capture`, `identity` (3.7);
 - `publisher` — ключ издателя (ставит `bridge app sign`), `network` — адреса в интернете (3.7);
-- `share: false` — не передавать соседям (3.6);
+- `share: false` — не передавать соседям (3.6); `autostart: true | {service, native}` — предложить хозяину автозапуск (включает только он, 3.9);
 - `net {proto, max, transport: "bridge"|"external", leaveWithChannel}` — сетевое приложение (см. «Сеансы»); приложению с одним `net` (без ui, native и actions) окно не нужно — к нему подключаются из редактора или своей программы;
 - `window {w, h}`, `platforms ["windows"…]`, `dev` (адрес сервера разработки для папки), `launch`, `opens` — заделы.
 
@@ -295,6 +295,27 @@ requests.post(B + "ui", json={"action": "join", "channel": "Семья"}, header
 SDK веб-интерфейса (`window.most`): `ready()`, `on("theme"|"file", f)`, `store.get/set`, `files.pick(opts)`, `files.save(name, data)`, `service.fetch(path, init)`, `service.status()`, `service.restart()`, `notify(text)`, `toast(text)`, `window.title(t)`, `window.badge(n)`, `window.popout()`; с 3.5 — `session.*` и `activity.*` (см. «Сеансы»).
 
 Командная строка: `bridge app new <id> [папка]`, `bridge app check <папка>`, `bridge app pack <папка> [--out файл]`.
+
+### Постоянное разрешение и автозапуск (3.9)
+
+`POST apps/allow {id, perms?, trust?, autostart?: {service, native}}`.
+- `trust: true` — постоянное разрешение. Новый код принимается без вопроса, если издатель тот же (для приложения, разрешённого без подписи, — любой), в `permissions` нет новых прав, а в `network` — новых адресов. Иначе состояние `changed`, причина — в `changeWhy`.
+- `autostart.service` — служба запускается с мостом и держится всё время (как `run: "always"`).
+- `autostart.native` — своё окно открывается один раз при запуске моста.
+
+Настройки разрешённого приложения: `POST apps/settings {id, trust?, autostart?: {service?, native?}, perms?: [..], signRevoke?: "<назначение>"}`. Если права изменились, работающее приложение перезапускается.
+
+`POST apps/data/clear {id}` — данные приложения уходят в корзину моста.
+
+Подписи без вопроса: `POST apps/identity/answer {ask, ok, remember?, always?}`. При `always` назначение запоминается в `consent.signAllowed`.
+
+В `GET apps` у приложения:
+- `consent {trust, autostart: {service, native}, signAllowed, at, version, updated}`;
+- `changeWhy`, `dataSize`;
+- `suggestAutostart` — что предлагает app.json (`"autostart": true | {service, native}`);
+- `serviceAlways`.
+
+Приложения настройки не видят и не меняют (это локальный API панели). С телефона и пока ПК управляют по сети они недоступны.
 
 ### Ключ пользователя и подпись издателя (3.7)
 

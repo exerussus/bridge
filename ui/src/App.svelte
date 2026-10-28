@@ -213,7 +213,7 @@
   onpointerdown={e => (downOnBack = e.target === e.currentTarget)}
   onclick={e => { if (e.target === e.currentTarget && downOnBack) closeModal(); downOnBack = false; }}>
   <div class="card">
-    {#if ui.modal}{@const M = ui.modal.c}<M {...ui.modal.p} />{/if}
+    {#if ui.modal}{@const M = ui.modal.c}<M {...(ui.modal?.p || {})} />{/if}
   </div>
 </div>
 <div class="toast" use:followFs>{#each ui.toasts as t (t.id)}<div class={t.kind}>{t.msg}</div>{/each}</div>

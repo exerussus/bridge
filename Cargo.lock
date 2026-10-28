@@ -275,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-app"
-version = "3.8.0"
+version = "3.9.0"
 dependencies = [
  "axum",
  "bridge-core",
@@ -291,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-core"
-version = "3.8.0"
+version = "3.9.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-node"
-version = "3.8.0"
+version = "3.9.0"
 dependencies = [
  "argon2",
  "axum",

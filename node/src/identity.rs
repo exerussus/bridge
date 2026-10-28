@@ -326,7 +326,7 @@ pub async fn sign(node: &std::sync::Arc<Node>, app: &str, purpose: &str, payload
         return Err("подписываемые данные — до 16 КБ".into());
     }
     let silent = purpose == SILENT_PURPOSE && !a.publisher.is_empty();
-    let remembered = node.identity.allowed.lock().contains(&(a.id.clone(), purpose.to_string()));
+    let remembered = node.identity.allowed.lock().contains(&(a.id.clone(), purpose.to_string())) || crate::apps::sign_allowed(node, &a.id, purpose);
     if !silent && !remembered {
         if !ask(node, &a, purpose, payload).await? {
             return Err("хозяин ПК не разрешил подпись".into());
@@ -365,11 +365,15 @@ async fn ask(node: &Node, a: &crate::apps::App, purpose: &str, payload: &str) ->
     }
 }
 
-/// Ответ хозяина: разрешить (и запомнить до перезапуска) или отказать.
-pub fn answer(node: &Node, ask: &str, ok: bool, remember: bool) -> Result<(), String> {
+/// Ответ хозяина: разрешить (и запомнить до перезапуска или навсегда — в настройках приложения) или отказать.
+pub fn answer(node: &Node, ask: &str, ok: bool, remember: bool, always: bool) -> Result<(), String> {
     let (info, tx) = node.identity.asks.lock().remove(ask).ok_or("запрос устарел")?;
-    if ok && remember {
-        node.identity.allowed.lock().insert((info["id"].as_str().unwrap_or("").to_string(), info["purpose"].as_str().unwrap_or("").to_string()));
+    let (id, purpose) = (info["id"].as_str().unwrap_or("").to_string(), info["purpose"].as_str().unwrap_or("").to_string());
+    if ok && always {
+        crate::apps::add_sign_allowed(node, &id, &purpose)?;
+        node.info(&format!("[ключ] «{}»: подписи «{}» — всегда без вопроса (снять — в настройках приложения)", info["name"].as_str().unwrap_or(""), purpose));
+    } else if ok && remember {
+        node.identity.allowed.lock().insert((id, purpose));
     }
     let _ = tx.send(ok);
     Ok(())

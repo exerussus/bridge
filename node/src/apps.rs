@@ -97,6 +97,8 @@ pub struct Apps {
     store_lock: Mutex<()>,
     /// Один проход по папке за раз (фон и «подхватить сейчас» не распаковывают пакет вдвоём).
     scan_lock: Mutex<()>,
+    /// (3.9) Чьё своё окно уже запущено автозапуском в этот запуск моста (окно запускается один раз).
+    autostarted: Mutex<std::collections::BTreeSet<String>>,
 }
 
 pub fn folder(node: &Node) -> PathBuf {
@@ -646,7 +648,7 @@ fn idle_stop(node: &Arc<Node>) {
     let list = node.apps.list.lock().clone();
     let mut to_stop = Vec::new();
     for (id, r) in node.apps.runs.lock().iter() {
-        let open_mode = list.get(id).map(|a| a.manifest["service"]["run"].as_str().unwrap_or("open") != "always").unwrap_or(true);
+        let open_mode = list.get(id).map(|a| !auto_service(node, a)).unwrap_or(true);
         if r.service.is_some() && open_mode && r.touched.map(|t| t.elapsed() > IDLE_STOP).unwrap_or(true) {
             to_stop.push(id.clone());
         }
@@ -656,13 +658,37 @@ fn idle_stop(node: &Arc<Node>) {
     }
 }
 
+/// Автозапуск службы: так велит app.json (`run: "always"`) или хозяин включил «Запускать вместе с мостом».
+fn auto_service(node: &Node, a: &App) -> bool {
+    a.manifest["service"].is_object() && (a.manifest["service"]["run"].as_str() == Some("always") || consent(node)[&a.id]["autostart"]["service"] == true)
+}
+
+/// Сразу применить автозапуск (после разрешения или смены настроек).
+pub fn kick(node: &Arc<Node>) {
+    start_always(node);
+}
+
 fn start_always(node: &Arc<Node>) {
     if node.remote.active().is_some() {
         return;
     }
+    accept_trusted_updates(node);
     let list = node.apps.list.lock().clone();
+    // своё окно с автозапуском — один раз за запуск моста (закрыли — не открываем снова)
     for a in list.values() {
-        if a.manifest["service"]["run"].as_str() == Some("always") && consent_ok(node, a) && a.unsupported.is_empty() {
+        if a.manifest["native"].is_object() && consent(node)[&a.id]["autostart"]["native"] == true && consent_ok(node, a) && a.unsupported.is_empty() {
+            let first = node.apps.autostarted.lock().insert(a.id.clone());
+            let running = node.apps.runs.lock().get(&a.id).map(|r| r.native.is_some()).unwrap_or(false);
+            if first && !running {
+                match start(node, &a.id, "native") {
+                    Ok(_) => node.info(&format!("[приложения] «{}»: своё окно — автозапуск с мостом", a.name)),
+                    Err(e) => node.info(&format!("[приложения] «{}»: автозапуск окна не удался — {}", a.name, e)),
+                }
+            }
+        }
+    }
+    for a in list.values() {
+        if auto_service(node, a) && consent_ok(node, a) && a.unsupported.is_empty() {
             let running = node.apps.runs.lock().get(&a.id).map(|r| r.service.is_some()).unwrap_or(false);
             let backoff = node.apps.runs.lock().get(&a.id).map(|r| r.restarts > 20).unwrap_or(false);
             if !running && !backoff {
@@ -696,15 +722,184 @@ pub fn granted(node: &Node, a: &App) -> Vec<String> {
     c[&a.id]["perms"].as_array().map(|x| x.iter().filter_map(|p| p.as_str().map(String::from)).filter(|p| a.perms.contains(p)).collect()).unwrap_or_default()
 }
 
+fn strs(v: &Value) -> Vec<String> {
+    v.as_array().map(|x| x.iter().filter_map(|p| p.as_str().map(String::from)).collect()).unwrap_or_default()
+}
+
+/// (3.9) Почему постоянное разрешение не приняло обновление сами (пусто — примет или не нужно).
+fn trust_blocker(rec: &Value, a: &App) -> String {
+    if rec["trust"] != true || rec["hash"].as_str() == Some(a.hash.as_str()) {
+        return String::new();
+    }
+    let pubr = rec["publisher"].as_str().unwrap_or("");
+    if !pubr.is_empty() && pubr != a.publisher {
+        return if a.publisher.is_empty() { "обновление без подписи издателя".into() } else { "другой издатель".into() };
+    }
+    let req = if rec["requested"].is_array() { strs(&rec["requested"]) } else { strs(&rec["perms"]) };
+    let new_perms: Vec<String> = a.perms.iter().filter(|p| !req.contains(p)).cloned().collect();
+    if !new_perms.is_empty() {
+        return format!("просит новые права: {}", new_perms.join(", "));
+    }
+    let nw = strs(&rec["network"]);
+    let new_net: Vec<String> = a.network.iter().filter(|u| !nw.contains(u)).cloned().collect();
+    if !new_net.is_empty() {
+        return format!("новые адреса в интернете: {}", new_net.join(", "));
+    }
+    String::new()
+}
+
+/// (3.9) Постоянное разрешение: обновление того же издателя без новых прав и адресов принимается без вопроса.
+fn accept_trusted_updates(node: &Arc<Node>) {
+    let list = node.apps.list.lock().clone();
+    let mut c = consent(node);
+    let mut changed = Vec::new();
+    for a in list.values() {
+        let rec = c[&a.id].clone();
+        if rec["trust"] != true || rec["hash"].as_str() == Some(a.hash.as_str()) || !trust_blocker(&rec, a).is_empty() {
+            continue;
+        }
+        let r = &mut c[&a.id];
+        r["hash"] = json!(a.hash);
+        r["version"] = json!(a.version);
+        r["requested"] = json!(a.perms);
+        r["network"] = json!(a.network);
+        if r["publisher"].as_str().unwrap_or("").is_empty() {
+            r["publisher"] = json!(a.publisher);
+        }
+        r["updated"] = json!(time::format(&time::now()));
+        changed.push(a.clone());
+    }
+    if changed.is_empty() {
+        return;
+    }
+    if write_json(&consent_file(node), &c).is_err() {
+        return;
+    }
+    for a in changed {
+        node.info(&format!("[приложения] «{}» обновлено до {} — постоянное разрешение, без вопроса", a.name, a.version));
+        // служба со старым кодом — перезапустить (автозапуск поднимет новую)
+        let running = node.apps.runs.lock().get(&a.id).map(|r| r.service.is_some()).unwrap_or(false);
+        if running {
+            stop(node, &a.id, "service", "приложение обновилось");
+        }
+    }
+    node.media.deliver(json!({ "media": "apps", "type": "changed" }));
+}
+
 pub fn allow(node: &Node, id: &str, perms: Option<Vec<String>>) -> Result<(), String> {
+    allow_ex(node, id, perms, None, None)
+}
+
+/// Разрешить: права (подмножество запрошенных), постоянно ли (обновления без вопроса), автозапуск. Прочие настройки сохраняются.
+pub fn allow_ex(node: &Node, id: &str, perms: Option<Vec<String>>, trust: Option<bool>, autostart: Option<Value>) -> Result<(), String> {
     let a = get(node, id).ok_or("нет такого приложения")?;
     let perms: Vec<String> = perms.unwrap_or_else(|| a.perms.clone()).into_iter().filter(|p| a.perms.contains(p)).collect();
     let mut c = consent(node);
-    c[id] = json!({ "hash": a.hash, "perms": perms, "at": time::format(&time::now()), "version": a.version });
+    let prev = c[id].clone();
+    let mut rec = json!({
+        "hash": a.hash, "perms": perms, "at": time::format(&time::now()), "version": a.version,
+        "requested": a.perms, "network": a.network, "publisher": a.publisher,
+        "trust": trust.unwrap_or(prev["trust"] == true),
+        "autostart": autostart.unwrap_or_else(|| if prev["autostart"].is_object() { prev["autostart"].clone() } else { json!({}) }),
+        "signAllowed": if prev["signAllowed"].is_array() { prev["signAllowed"].clone() } else { json!([]) },
+    });
+    clean_autostart(&a, &mut rec["autostart"]);
+    c[id] = rec;
     write_json(&consent_file(node), &c)?;
-    node.info(&format!("[приложения] «{}» {}: разрешено (права: {})", a.name, a.version, if perms.is_empty() { "—".into() } else { perms.join(", ") }));
+    node.info(&format!("[приложения] «{}» {}: разрешено{} (права: {})", a.name, a.version, if c[id]["trust"] == true { " постоянно" } else { "" }, if perms.is_empty() { "—".into() } else { perms.join(", ") }));
     node.media.deliver(json!({ "media": "apps", "type": "changed" }));
     Ok(())
+}
+
+fn clean_autostart(a: &App, v: &mut Value) {
+    let svc = a.manifest["service"].is_object() && v["service"] == true;
+    let nat = a.manifest["native"].is_object() && v["native"] == true;
+    *v = json!({ "service": svc, "native": nat });
+}
+
+/// (3.9) Настройки приложения у хозяина: постоянное разрешение, автозапуск, права, подписи без вопроса.
+pub fn settings(node: &Arc<Node>, id: &str, v: &Value) -> Result<Value, String> {
+    if let Some(g) = node.remote.active() {
+        return Err(format!("пока этим ПК управляет {}, настройки приложений не меняются", g.peer));
+    }
+    let a = get(node, id).ok_or("нет такого приложения")?;
+    if !consent_ok(node, &a) {
+        return Err(format!("«{}» не разрешено на этом ПК — сначала разрешите его", a.name));
+    }
+    let mut c = consent(node);
+    let rec = &mut c[id];
+    if let Some(t) = v["trust"].as_bool() {
+        rec["trust"] = json!(t);
+    }
+    if v["autostart"].is_object() {
+        let mut au = if rec["autostart"].is_object() { rec["autostart"].clone() } else { json!({}) };
+        for k in ["service", "native"] {
+            if let Some(b) = v["autostart"][k].as_bool() {
+                au[k] = json!(b);
+            }
+        }
+        clean_autostart(&a, &mut au);
+        rec["autostart"] = au;
+    }
+    if v["perms"].is_array() {
+        rec["perms"] = json!(strs(&v["perms"]).into_iter().filter(|p| a.perms.contains(p)).collect::<Vec<_>>());
+    }
+    if let Some(p) = v["signRevoke"].as_str() {
+        let left: Vec<String> = strs(&rec["signAllowed"]).into_iter().filter(|x| x != p).collect();
+        rec["signAllowed"] = json!(left);
+    }
+    let rec = rec.clone();
+    write_json(&consent_file(node), &c)?;
+    node.info(&format!("[приложения] «{}»: настройки — постоянно: {}, автозапуск службы: {}, окна: {}, права: {}", a.name, if rec["trust"] == true { "да" } else { "нет" }, if rec["autostart"]["service"] == true { "да" } else { "нет" }, if rec["autostart"]["native"] == true { "да" } else { "нет" }, strs(&rec["perms"]).join(", ")));
+    // автозапуск включили — запустить сразу; права урезали — перезапустить работающее с новыми правами
+    if v["perms"].is_array() {
+        stop_all(node, id, "права изменены");
+    }
+    if v["autostart"]["native"] == true {
+        node.apps.autostarted.lock().remove(id);
+    }
+    start_always(node);
+    node.media.deliver(json!({ "media": "apps", "type": "changed" }));
+    Ok(rec)
+}
+
+/// Подписи этим назначением — без вопроса (хозяин ответил «всегда»).
+pub fn sign_allowed(node: &Node, id: &str, purpose: &str) -> bool {
+    strs(&consent(node)[id]["signAllowed"]).iter().any(|p| p == purpose)
+}
+
+pub fn add_sign_allowed(node: &Node, id: &str, purpose: &str) -> Result<(), String> {
+    let mut c = consent(node);
+    if !c[id].is_object() {
+        return Err("приложение не разрешено".into());
+    }
+    let mut l = strs(&c[id]["signAllowed"]);
+    if !l.iter().any(|p| p == purpose) {
+        l.push(purpose.to_string());
+    }
+    c[id]["signAllowed"] = json!(l);
+    write_json(&consent_file(node), &c)
+}
+
+/// Стереть данные приложения (хранилище и папку данных) — в корзину моста.
+pub fn clear_data(node: &Arc<Node>, id: &str) -> Result<(), String> {
+    let a = get(node, id).ok_or("нет такого приложения")?;
+    stop_all(node, id, "данные очищаются");
+    let d = data_dir(node, id);
+    if d.exists() {
+        let to = node.folders.trash_dir().join("данные приложений").join(format!("{}--{}", chrono::Local::now().format("%Y%m%d-%H%M%S"), id));
+        if let Some(p) = to.parent() {
+            std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
+        }
+        std::fs::rename(&d, &to).map_err(|e| format!("не удалось убрать данные: {}", e))?;
+    }
+    node.info(&format!("[приложения] «{}»: данные очищены (в корзине моста)", a.name));
+    node.media.deliver(json!({ "media": "apps", "type": "changed" }));
+    Ok(())
+}
+
+fn dir_size(p: &Path) -> i64 {
+    bridge_core::scanner::walk(p, &[]).iter().map(|w| w.size).sum()
 }
 
 pub fn revoke(node: &Arc<Node>, id: &str) -> Result<(), String> {
@@ -713,6 +908,7 @@ pub fn revoke(node: &Arc<Node>, id: &str) -> Result<(), String> {
         o.remove(id);
     }
     write_json(&consent_file(node), &c)?;
+    node.apps.autostarted.lock().remove(id);
     stop_all(node, id, "разрешение отозвано");
     node.media.deliver(json!({ "media": "apps", "type": "changed" }));
     Ok(())
@@ -736,7 +932,27 @@ fn state_of(node: &Node, a: &App) -> &'static str {
     }
 }
 
+fn consent_view(rec: &Value) -> Value {
+    if !rec.is_object() {
+        return Value::Null;
+    }
+    json!({ "trust": rec["trust"] == true, "autostart": { "service": rec["autostart"]["service"] == true, "native": rec["autostart"]["native"] == true }, "signAllowed": rec["signAllowed"].as_array().cloned().unwrap_or_default(), "at": rec["at"], "version": rec["version"], "updated": rec["updated"] })
+}
+
+/// Почему мост снова спрашивает разрешение (для окна разрешения).
+fn change_why(rec: &Value, a: &App) -> String {
+    if !rec.is_object() || rec["hash"].as_str() == Some(a.hash.as_str()) {
+        return String::new();
+    }
+    let b = trust_blocker(rec, a);
+    if !b.is_empty() {
+        return b;
+    }
+    if rec["trust"] == true { String::new() } else { "изменились программы или права".into() }
+}
+
 pub fn status(node: &Node) -> Value {
+    let cons = consent(node);
     let list = node.apps.list.lock().clone();
     let runs = node.apps.runs.lock();
     let apps: Vec<Value> = list
@@ -755,6 +971,7 @@ pub fn status(node: &Node) -> Value {
                 "dev": if a.packaged { Value::Null } else { m["dev"].clone() },
                 "hash": a.hash, "uiStamp": a.ui_stamp,
                 "publisher": a.publisher, "publisherFp": crate::identity::fingerprint_b64(&a.publisher), "sigNote": a.sig_note, "network": a.network,
+                "consent": consent_view(&cons[&a.id]), "suggestAutostart": { "service": a.manifest["service"].is_object() && (a.manifest["autostart"] == true || a.manifest["autostart"]["service"] == true), "native": a.manifest["native"].is_object() && a.manifest["autostart"]["native"] == true }, "serviceAlways": a.manifest["service"]["run"] == "always", "changeWhy": change_why(&cons[&a.id], a), "dataSize": dir_size(&data_dir(node, &a.id)),
                 "runningService": r.and_then(|r| rs(&r.service)), "runningNative": r.and_then(|r| rs(&r.native)),
                 "lastExit": r.map(|r| r.last_exit.clone()).unwrap_or_default(),
             })

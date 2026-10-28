@@ -6,6 +6,7 @@
   import { AP, byId, ordered, reorder, openApp, closeApp, reloadApp, popout, frameSrc, sandboxOf, allowOf, onFrameMessage, emitTo, startApps, closeNet, loadSessions, importPackages, acceptOffer, declineOffer, takeFrom, loadApps, PERM_LABEL, type AppInfo } from '../lib/apps.svelte';
   import AppConsent from '../modals/AppConsent.svelte';
   import AppShare from '../modals/AppShare.svelte';
+  import AppSettings from '../modals/AppSettings.svelte';
   import Gi from '../components/Gi.svelte';
 
   startApps();
@@ -58,6 +59,7 @@
     if (a.state === 'new') return ['новое · разрешить', 'warn'];
     if (a.state === 'changed') return ['обновлено · разрешить', 'warn'];
     if (a.runningNative) return ['запущено', 'good'];
+    if (a.consent?.autostart?.service && a.runningService) return ['автозапуск · работает', 'good'];
     if (a.runningService) return ['служба работает', 'good'];
     if (a.native) return ['своё окно', 'quiet'];
     if (!a.ui && !a.actions.length && a.net) return ['сетевое', 'quiet'];
@@ -269,7 +271,7 @@
       {#if a.service && a.state === 'ok'}{#if a.runningService}<button role="menuitem" onclick={() => call('apps/stop', { id: a.id, kind: 'service' }, 'Служба остановлена')}>Остановить службу</button>{:else}<button role="menuitem" onclick={() => call('apps/start', { id: a.id, kind: 'service' }, 'Служба запущена')}>Запустить службу</button>{/if}{/if}
       <button role="menuitem" onclick={() => showLog(a.id)}>Журнал</button>
       <button role="menuitem" onclick={() => { const id = a.id; menu = null; openModal(AppShare, { id }); }}>Отправить соседям…</button>
-      <button role="menuitem" onclick={() => { const id = a.id; menu = null; openModal(AppConsent, { id }); }}>Права и о приложении…</button>
+      <button role="menuitem" onclick={() => { const id = a.id, ok = a.state === 'ok'; menu = null; openModal(ok ? AppSettings : AppConsent, { id }); }}>{a.state === 'ok' ? 'Настройки приложения…' : 'Разрешить…'}</button>
       <button role="menuitem" data-open="apps" onclick={() => (menu = null)}>Показать папку приложений</button>
       {#if a.state === 'ok'}<button role="menuitem" onclick={() => { closeApp(a.id); call('apps/revoke', { id: a.id }, 'Разрешение отозвано'); }}>Отозвать разрешение</button>{/if}
       <i class="msep"></i>

@@ -1,7 +1,8 @@
 // Приложения (3.4): список, открытые вкладки, обработчик вызовов из изолированных рамок (most.* → панель → мост).
 // Состояние живёт в модуле: открытые приложения не перезагружаются при переходе на другие вкладки моста.
 import { api, authHeaders, API, onMedia, upload } from './api';
-import { SET, setSet, toast, ui, badgeCount, titleOf } from './state.svelte';
+import { SET, setSet, toast, ui, badgeCount, titleOf, openModal } from './state.svelte';
+import SignAsk from '../modals/SignAsk.svelte';
 import { pickFiles } from './util';
 import { notifyTo } from './notify';
 
@@ -12,6 +13,9 @@ export type AppInfo = {
   hash: string; uiStamp: string; entry: string; runningService: any; runningNative: any; lastExit: string;
   /** 3.7: проверенный издатель (пусто — без подписи), почему подпись не засчитана, адреса в интернете. */
   publisher: string; publisherFp: string; sigNote: string; network: string[];
+  /** 3.9: настройки хозяина (постоянно, автозапуск, подписи без вопроса), почему спрашивает снова, размер данных. */
+  consent: null | { trust: boolean; autostart: { service: boolean; native: boolean }; signAllowed: string[]; at: string; version: string; updated?: string };
+  changeWhy: string; dataSize: number; suggestAutostart: { service: boolean; native: boolean }; serviceAlways: boolean;
 };
 
 export const PERM_LABEL: Record<string, string> = {
@@ -325,12 +329,16 @@ async function devAsk(m: any) {
 
 // приложение просит подписать строку вашим ключом (не вход от проверенного издателя) — решает хозяин ПК
 const signAsked = new Set<string>();
-async function signAsk(m: any) {
+const signQueue: any[] = [];
+function signAsk(m: any) {
   if (signAsked.has(m.ask)) return; signAsked.add(m.ask);
   notifyTo('Мост', '«' + m.name + '» просит подпись вашим ключом', 'apps');
-  const who = m.publisher ? 'издатель ' + m.publisherFp : 'без подписи издателя';
-  const ok = confirm('«' + m.name + '» (' + who + ') просит подписать вашим ключом.\n\nНазначение: ' + m.purpose + '\nДанные: ' + (m.preview || '—') + '\n\nРазрешить? До перезапуска моста такие подписи этого приложения будут выдаваться без вопроса.');
-  try { await api('POST', 'apps/identity/answer', { ask: m.ask, ok, remember: ok }); } catch (e: any) { toast(e.message, 'bad'); }
+  signQueue.push(m);
+  if (signQueue.length === 1) showSign();
+}
+function showSign() {
+  const m = signQueue[0]; if (!m) return;
+  openModal(SignAsk, { m, done: () => { signQueue.shift(); setTimeout(showSign, 50); } });
 }
 
 /** Принять / отклонить предложение соседа, «Взять у хоста». */

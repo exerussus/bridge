@@ -2181,7 +2181,7 @@ async fn identity_keys_signatures_and_publisher() {
     }
     let asked = asked.expect("вопрос хозяину");
     assert_eq!(asked["purpose"], "link-key");
-    identity::answer(&dev, asked["ask"].as_str().unwrap(), true, true).unwrap();
+    identity::answer(&dev, asked["ask"].as_str().unwrap(), true, true, false).unwrap();
     assert!(waiter.await.unwrap().is_ok());
     assert!(identity::sign(&dev, "pets", "link-key", "k3").await.is_ok(), "запомнено до перезапуска");
     // резервная копия: смена ключа → восстановление тем же паролем → прежний ключ для издателя
@@ -2249,5 +2249,117 @@ async fn identity_keys_signatures_and_publisher() {
     assert!(apps::parse_manifest(&d, r#"{"id":"most","name":"x","ui":"ui/index.html"}"#).unwrap_err().contains("занят мостом"));
     assert!(apps::parse_manifest(&d, r#"{"id":"x","name":"x","ui":"ui/index.html","network":["https://*.evil.com"]}"#).is_err());
     assert!(apps::parse_manifest(&d, r#"{"id":"x","name":"x","ui":"ui/index.html","network":["http://plain.com"]}"#).is_err());
+    net.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn app_settings_trust_and_autostart() {
+    use bridge_node::{apps, identity};
+    let mut net = pair();
+    net.start().await;
+    let dev = net.n("dev").clone();
+    let d = apps::folder(&dev).join("printer");
+    std::fs::create_dir_all(d.join("bin")).unwrap();
+    let write_app = |ver: &str, perms: &str, body: &str| {
+        std::fs::write(d.join("app.json"), format!(r#"{{"id":"printer","name":"Принтер","version":"{}","service":{{"cmd":"bin/svc.sh"}},"native":{{"cmd":"bin/win.sh"}},"permissions":[{}]}}"#, ver, perms)).unwrap();
+        std::fs::write(d.join("bin/svc.sh"), format!("#!/bin/sh\necho {} >> \"$MOST_DATA/svc.log\"\nsleep 60\n", body)).unwrap();
+        std::fs::write(d.join("bin/win.sh"), "#!/bin/sh\necho win >> \"$MOST_DATA/win.log\"\nsleep 60\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for f in ["bin/svc.sh", "bin/win.sh"] {
+                std::fs::set_permissions(d.join(f), std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+    };
+    let wait = |f: Box<dyn Fn() -> bool>| async move {
+        for _ in 0..80 {
+            if f() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        false
+    };
+    write_app("1.0", r#""notify","identity""#, "v1");
+    apps::scan(&dev);
+    // разово (как раньше): изменение кода → спросит снова
+    apps::allow_ex(&dev, "printer", None, Some(false), None).unwrap();
+    write_app("1.1", r#""notify","identity""#, "v11");
+    apps::scan(&dev);
+    apps::kick(&dev);
+    assert!(!apps::consent_ok(&dev, &apps::get(&dev, "printer").unwrap()), "без постоянного разрешения — спросить снова");
+    // постоянно + автозапуск службы и окна
+    apps::allow_ex(&dev, "printer", None, Some(true), Some(serde_json::json!({ "service": true, "native": true }))).unwrap();
+    apps::kick(&dev);
+    let data = apps::data_dir(&dev, "printer");
+    #[cfg(unix)]
+    {
+        let (d1, d2) = (data.clone(), data.clone());
+        assert!(wait(Box::new(move || std::fs::read_to_string(d1.join("svc.log")).map(|t| t.contains("v11")).unwrap_or(false))).await, "служба запущена автозапуском");
+        assert!(wait(Box::new(move || d2.join("win.log").exists())).await, "своё окно запущено автозапуском");
+        // окно закрыли — автозапуск не открывает его снова до перезапуска моста
+        apps::stop(&dev, "printer", "native", "тест");
+        apps::kick(&dev);
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(std::fs::read_to_string(data.join("win.log")).unwrap().lines().count(), 1, "окно — один раз за запуск моста");
+    }
+    // обновление того же «издателя» (папка) без новых прав — принято само, служба перезапущена с новым кодом
+    write_app("1.2", r#""notify","identity""#, "v12");
+    apps::scan(&dev);
+    apps::kick(&dev);
+    let a = apps::get(&dev, "printer").unwrap();
+    assert!(apps::consent_ok(&dev, &a), "постоянное разрешение приняло обновление");
+    let st = apps::status(&dev);
+    let me = st["list"].as_array().unwrap().iter().find(|x| x["id"] == "printer").unwrap().clone();
+    assert_eq!(me["consent"]["version"], "1.2");
+    assert_eq!(me["consent"]["trust"], true);
+    #[cfg(unix)]
+    {
+        let d3 = data.clone();
+        assert!(wait(Box::new(move || std::fs::read_to_string(d3.join("svc.log")).map(|t| t.contains("v12")).unwrap_or(false))).await, "служба поднялась с новым кодом");
+    }
+    // новые права — постоянное разрешение не спасает, причина понятна
+    write_app("1.3", r#""notify","identity","files.read""#, "v13");
+    apps::scan(&dev);
+    apps::kick(&dev);
+    let a = apps::get(&dev, "printer").unwrap();
+    assert!(!apps::consent_ok(&dev, &a));
+    let me = apps::status(&dev)["list"].as_array().unwrap().iter().find(|x| x["id"] == "printer").unwrap().clone();
+    assert!(me["changeWhy"].as_str().unwrap().contains("files.read"), "{}", me["changeWhy"]);
+    // разрешили заново — настройки (постоянно, автозапуск) сохранились
+    apps::allow(&dev, "printer", None).unwrap();
+    let me = apps::status(&dev)["list"].as_array().unwrap().iter().find(|x| x["id"] == "printer").unwrap().clone();
+    assert_eq!((me["consent"]["trust"].clone(), me["consent"]["autostart"]["service"].clone()), (serde_json::json!(true), serde_json::json!(true)), "{}", me["consent"]);
+    // права переключателем
+    let r = apps::settings(&dev, "printer", &serde_json::json!({ "perms": ["identity"] })).unwrap();
+    assert_eq!(r["perms"], serde_json::json!(["identity"]));
+    assert_eq!(apps::granted(&dev, &apps::get(&dev, "printer").unwrap()), vec!["identity".to_string()]);
+    // подпись «всегда» — запоминается в настройках приложения и снимается там же
+    let d2 = dev.clone();
+    let waiter = tokio::spawn(async move { identity::sign(&d2, "printer", "print", "job-1").await });
+    let mut ask = None;
+    for _ in 0..50 {
+        if let Some(x) = identity::pending(&dev).into_iter().next() {
+            ask = Some(x);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    identity::answer(&dev, ask.unwrap()["ask"].as_str().unwrap(), true, false, true).unwrap();
+    assert!(waiter.await.unwrap().is_ok());
+    assert!(apps::sign_allowed(&dev, "printer", "print"));
+    assert!(identity::sign(&dev, "printer", "print", "job-2").await.is_ok(), "всегда — без вопроса");
+    apps::settings(&dev, "printer", &serde_json::json!({ "signRevoke": "print" })).unwrap();
+    assert!(!apps::sign_allowed(&dev, "printer", "print"));
+    // данные — в корзину
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("store.json"), "{}").unwrap();
+    apps::clear_data(&dev, "printer").unwrap();
+    assert!(!data.join("store.json").exists());
+    // выключили автозапуск и отозвали — служба остановлена
+    apps::settings(&dev, "printer", &serde_json::json!({ "autostart": { "service": false } })).unwrap();
+    apps::revoke(&dev, "printer").unwrap();
+    assert!(apps::settings(&dev, "printer", &serde_json::json!({ "trust": true })).is_err(), "без разрешения настройки не меняются");
     net.stop().await;
 }

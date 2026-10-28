@@ -36,8 +36,14 @@ pub fn routes() -> Router<Arc<crate::node::Node>> {
         .route(&l("apps"), get(|State(n): St| async move { ok_json(&apps::status(&n)) }))
         .route(&l("apps/allow"), post(|State(n): St, Json(v): Json<Value>| async move {
             let perms = v["perms"].as_array().map(|x| x.iter().filter_map(|p| p.as_str().map(String::from)).collect());
-            res(apps::allow(&n, &s(&v, "id"), perms).map(|_| json!({ "ok": true })))
+            let r = apps::allow_ex(&n, &s(&v, "id"), perms, v["trust"].as_bool(), if v["autostart"].is_object() { Some(v["autostart"].clone()) } else { None });
+            if r.is_ok() {
+                apps::kick(&n);
+            }
+            res(r.map(|_| json!({ "ok": true })))
         }))
+        .route(&l("apps/settings"), post(|State(n): St, Json(v): Json<Value>| async move { res(apps::settings(&n, &s(&v, "id"), &v)) }))
+        .route(&l("apps/data/clear"), post(|State(n): St, Json(v): Json<Value>| async move { res(apps::clear_data(&n, &s(&v, "id")).map(|_| json!({ "ok": true }))) }))
         .route(&l("apps/revoke"), post(|State(n): St, Json(v): Json<Value>| async move { res(apps::revoke(&n, &s(&v, "id")).map(|_| json!({ "ok": true }))) }))
         .route(&l("apps/remove"), post(|State(n): St, Json(v): Json<Value>| async move { res(apps::remove(&n, &s(&v, "id")).map(|to| json!({ "ok": true, "trash": to }))) }))
         // передача приложений соседям (3.6)
@@ -102,7 +108,7 @@ pub fn routes() -> Router<Arc<crate::node::Node>> {
         .route(&l("identity/import"), post(|State(n): St, Json(v): Json<Value>| async move { res(crate::identity::import(&n, &v["file"], &s(&v, "password"))) }))
         .route(&l("apps/identity"), get(|State(n): St, Query(m): Q| async move { res(crate::identity::get(&n, q(&m, "id"))) }))
         .route(&l("apps/identity/sign"), post(|State(n): St, Json(v): Json<Value>| async move { res(crate::identity::sign(&n, &s(&v, "id"), &s(&v, "purpose"), v["payload"].as_str().unwrap_or("")).await) }))
-        .route(&l("apps/identity/answer"), post(|State(n): St, Json(v): Json<Value>| async move { res(crate::identity::answer(&n, &s(&v, "ask"), v["ok"] == true, v["remember"] == true).map(|_| json!({ "ok": true }))) }))
+        .route(&l("apps/identity/answer"), post(|State(n): St, Json(v): Json<Value>| async move { res(crate::identity::answer(&n, &s(&v, "ask"), v["ok"] == true, v["remember"] == true, v["always"] == true).map(|_| json!({ "ok": true }))) }))
         .route(&l("apps/net"), get(|State(n): St| async move { ok_json(&crate::net::status(&n)) }))
         .route(&l("apps/net/channel"), post(|State(n): St, Json(v): Json<Value>| async move {
             let members: Vec<String> = v["members"].as_array().map(|x| x.iter().filter_map(|m| m.as_str().map(String::from)).collect()).unwrap_or_default();

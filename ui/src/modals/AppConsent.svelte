@@ -8,6 +8,11 @@
   // по умолчанию — всё, что приложение просит (снять галочку можно); задаём сразу, до привязки флажков
   let picked = $state<Record<string, boolean>>(Object.fromEntries((AP.list.find(x => x.id === id)?.perms || []).map(p => [p, true])));
   let busy = $state(false);
+  // (3.9) постоянное разрешение и автозапуск — сразу при разрешении (потом меняются в настройках приложения)
+  const a0 = AP.list.find(x => x.id === id);
+  let trust = $state(!!a0?.consent?.trust);
+  let auSvc = $state(!!(a0?.consent?.autostart?.service || a0?.suggestAutostart?.service));
+  let auNat = $state(!!(a0?.consent?.autostart?.native || a0?.suggestAutostart?.native));
   const hue = (s: string) => { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h % 360; };
   const runs = $derived(!a ? [] : [
     ...(a.native ? ['своё окно'] : []),
@@ -19,7 +24,7 @@
     busy = true;
     try {
       const go = !!then, app = id;
-      await api('POST', 'apps/allow', { id: app, perms: a.perms.filter(p => picked[p]) });
+      await api('POST', 'apps/allow', { id: app, perms: a.perms.filter(p => picked[p]), trust, autostart: { service: auSvc, native: auNat } });
       await loadApps();
       closeModal();
       if (go) openApp(app);
@@ -35,7 +40,7 @@
   <div class="row" style="gap:14px;align-items:center">
     <span class="appic big" style="--h:{hue(a.id)}">{#if a.icon}<img src={'/apps/' + encodeURIComponent(a.id) + '/icon'} alt="" />{:else}{a.name.slice(0, 2)}{/if}</span>
     <div><div style="font-size:20px;font-weight:600">{a.name} <span class="muted" style="font-size:14px;font-weight:400">{a.version}</span></div>
-      <div class="small muted">{a.state === 'changed' ? 'Приложение изменилось — разрешите заново' : 'Новое приложение в папке «приложения»'}{a.author ? ' · ' + a.author : ''} · {a.packaged ? 'пакет .most-app' : 'папка'}</div></div>
+      <div class="small muted">{a.state === 'changed' ? 'Приложение изменилось' + (a.changeWhy ? ' — ' + a.changeWhy : '') + ', разрешите заново' : 'Новое приложение в папке «приложения»'}{a.author ? ' · ' + a.author : ''} · {a.packaged ? 'пакет .most-app' : 'папка'}</div></div>
   </div>
   {#if a.description}<p class="small" style="margin:10px 0 0">{a.description}</p>{/if}
   <div class="small" style="margin-top:10px">Издатель: {#if a.publisher}<b class="mono">{a.publisherFp}</b> <span class="muted">— подпись проверена</span>{:else}<span class="muted">без подписи{a.sigNote ? ' (' + a.sigNote + ')' : ''}</span>{/if}</div>
@@ -51,9 +56,22 @@
       <label class="small" style="display:flex;gap:8px;align-items:center;padding:3px 0"><input type="checkbox" bind:checked={picked[p]} /> {PERM_LABEL[p] || p}</label>
     {/each}
   {:else}<div class="small muted" style="margin-top:10px">Особых прав не просит: только свои настройки и окно.</div>{/if}
+  <div class="plbl" style="margin-top:12px">Разрешение</div>
+  <label class="small cline"><input type="radio" name="trust" checked={!trust} onchange={() => (trust = false)} /> Только эту версию — при обновлении спросить снова</label>
+  <label class="small cline"><input type="radio" name="trust" checked={trust} onchange={() => (trust = true)} /> Постоянно — обновления {a.publisher ? 'этого издателя' : 'этой папки'} без вопроса, если не просят новых прав и адресов</label>
+  {#if trust && !a.publisher}<div class="small" style="color:var(--warn);margin:2px 0 0 24px">Приложение без подписи: любой, кто изменит его файлы на этом ПК, обновит его без вопроса. Подходит для своих приложений.</div>{/if}
+  {#if a.service || a.native}
+    <div class="plbl" style="margin-top:12px">Запускать вместе с мостом</div>
+    {#if a.service}<label class="small cline"><input type="checkbox" bind:checked={auSvc} disabled={a.serviceAlways} /> Фоновая служба{a.serviceAlways ? ' (работает всегда — так задано приложением)' : ' — работает всё время, пока работает мост'}</label>{/if}
+    {#if a.native}<label class="small cline"><input type="checkbox" bind:checked={auNat} /> Своё окно — открывается при запуске моста</label>{/if}
+  {/if}
   <div class="small muted" style="margin-top:10px">Никогда: управление ПК, настройки моста, соседи и права доступа, ключи. Сменится программа или список прав — мост спросит снова.</div>
   <div class="row" style="margin-top:14px;gap:8px"><button class="b danger" onclick={remove}>Убрать</button><div class="grow"></div><button class="b" onclick={closeModal}>Не сейчас</button><button class="b pri" disabled={busy} onclick={allow}>{then ? 'Разрешить и открыть' : 'Разрешить'}</button></div>
 {:else}
   <div class="empty">Приложение убрано</div>
   <div class="row"><div class="grow"></div><button class="b" onclick={closeModal}>Закрыть</button></div>
 {/if}
+
+<style>
+  .cline { display: flex; gap: 8px; align-items: center; padding: 3px 0; }
+</style>
