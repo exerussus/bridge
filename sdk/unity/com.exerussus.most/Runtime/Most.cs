@@ -19,7 +19,7 @@ namespace Exerussus.Most
     /// </summary>
     public static class Most
     {
-        public const string Version = "3.5.0";
+        public const string Version = "3.7.0";
 
         /// <summary>Текущее подключение (или null).</summary>
         public static MostClient Client { get; private set; }

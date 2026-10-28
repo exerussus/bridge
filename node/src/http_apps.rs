@@ -40,6 +40,17 @@ pub fn routes() -> Router<Arc<crate::node::Node>> {
         }))
         .route(&l("apps/revoke"), post(|State(n): St, Json(v): Json<Value>| async move { res(apps::revoke(&n, &s(&v, "id")).map(|_| json!({ "ok": true }))) }))
         .route(&l("apps/remove"), post(|State(n): St, Json(v): Json<Value>| async move { res(apps::remove(&n, &s(&v, "id")).map(|to| json!({ "ok": true, "trash": to }))) }))
+        // передача приложений соседям (3.6)
+        .route(&l("apps/share"), post(|State(n): St, Json(v): Json<Value>| async move {
+            let peers: Vec<String> = v["peers"].as_array().map(|x| x.iter().filter_map(|p| p.as_str().map(String::from)).collect()).unwrap_or_default();
+            res(crate::app_share::share(&n, &s(&v, "id"), &peers).await)
+        }))
+        .route(&l("apps/offer/accept"), post(|State(n): St, Json(v): Json<Value>| async move { res(crate::app_share::accept(&n, &s(&v, "offer")).map(|_| json!({ "ok": true }))) }))
+        .route(&l("apps/offer/decline"), post(|State(n): St, Json(v): Json<Value>| async move {
+            crate::app_share::decline(&n, &s(&v, "offer"));
+            ok_json(&json!({ "ok": true }))
+        }))
+        .route(&l("apps/take"), post(|State(n): St, Json(v): Json<Value>| async move { res(crate::app_share::take(&n, &s(&v, "peer"), &s(&v, "id")).await.map(|o| json!({ "ok": true, "offer": o }))) }))
         .route(&l("apps/start"), post(|State(n): St, Json(v): Json<Value>| async move { res(apps::start(&n, &s(&v, "id"), &s(&v, "kind"))) }))
         .route(&l("apps/stop"), post(|State(n): St, Json(v): Json<Value>| async move {
             apps::stop(&n, &s(&v, "id"), &s(&v, "kind"), "остановлено из панели");
@@ -82,6 +93,16 @@ pub fn routes() -> Router<Arc<crate::node::Node>> {
             }
         }))
         .route(&a("activity"), get(app_activity))
+        // ключ пользователя (3.7): приложению — свой ключ для издателя и подпись строки
+        .route(&a("identity"), get(app_identity))
+        .route(&a("identity/sign"), post(app_identity_sign))
+        .route(&l("identity"), get(|State(n): St| async move { ok_json(&crate::identity::status(&n)) }))
+        .route(&l("identity/rotate"), post(|State(n): St| async move { res(crate::identity::rotate(&n)) }))
+        .route(&l("identity/export"), post(|State(n): St, Json(v): Json<Value>| async move { res(crate::identity::export(&n, &s(&v, "password"))) }))
+        .route(&l("identity/import"), post(|State(n): St, Json(v): Json<Value>| async move { res(crate::identity::import(&n, &v["file"], &s(&v, "password"))) }))
+        .route(&l("apps/identity"), get(|State(n): St, Query(m): Q| async move { res(crate::identity::get(&n, q(&m, "id"))) }))
+        .route(&l("apps/identity/sign"), post(|State(n): St, Json(v): Json<Value>| async move { res(crate::identity::sign(&n, &s(&v, "id"), &s(&v, "purpose"), v["payload"].as_str().unwrap_or("")).await) }))
+        .route(&l("apps/identity/answer"), post(|State(n): St, Json(v): Json<Value>| async move { res(crate::identity::answer(&n, &s(&v, "ask"), v["ok"] == true, v["remember"] == true).map(|_| json!({ "ok": true }))) }))
         .route(&l("apps/net"), get(|State(n): St| async move { ok_json(&crate::net::status(&n)) }))
         .route(&l("apps/net/channel"), post(|State(n): St, Json(v): Json<Value>| async move {
             let members: Vec<String> = v["members"].as_array().map(|x| x.iter().filter_map(|m| m.as_str().map(String::from)).collect()).unwrap_or_default();
@@ -158,6 +179,22 @@ async fn dev_request(State(node): St, Json(v): Json<Value>) -> Response {
 
 async fn dev_state(State(node): St, Query(m): Q) -> Response {
     ok_json(&crate::net::dev_state(&node, q(&m, "req")))
+}
+
+async fn app_identity(State(node): St, h: HeaderMap) -> Response {
+    let Some(a) = app_of(&node, &h) else { return err(401, "нужен токен приложения") };
+    match crate::identity::get(&node, &a.id) {
+        Ok(v) => ok_json(&v),
+        Err(e) => err(403, e),
+    }
+}
+
+async fn app_identity_sign(State(node): St, h: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(a) = app_of(&node, &h) else { return err(401, "нужен токен приложения") };
+    match crate::identity::sign(&node, &a.id, &s(&v, "purpose"), v["payload"].as_str().unwrap_or("")).await {
+        Ok(v) => ok_json(&v),
+        Err(e) => err(403, e),
+    }
 }
 
 async fn app_activity(State(node): St, h: HeaderMap, Query(m): Q) -> Response {
@@ -274,8 +311,10 @@ fn mime(p: &str) -> &'static str {
 fn app_csp(node: &crate::node::Node, a: &apps::App) -> String {
     let base = apps::base_url(node);
     let lock = if a.perms.iter().any(|p| p == "input.capture") { " allow-pointer-lock" } else { "" };
+    // адреса из app.json `network` (показаны хозяину при разрешении; входят в отпечаток)
+    let net: String = a.network.iter().map(|u| format!(" {}", u)).collect();
     format!(
-        "sandbox allow-scripts allow-forms{lock}; default-src 'self' {base} data: blob:; script-src 'self' {base} 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' {base} 'unsafe-inline'; img-src 'self' {base} data: blob:; media-src 'self' {base} data: blob: mediastream:; font-src 'self' {base} data:; connect-src 'self' {base} data: blob:; worker-src 'self' {base} blob:; frame-src 'none'; object-src 'none'; frame-ancestors http://127.0.0.1:* http://localhost:* bridge: http://bridge.localhost https://bridge.localhost"
+        "sandbox allow-scripts allow-forms{lock}; default-src 'self' {base} data: blob:; script-src 'self' {base} 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' {base} 'unsafe-inline'; img-src 'self' {base} data: blob:; media-src 'self' {base} data: blob: mediastream:; font-src 'self' {base} data:; connect-src 'self' {base} data: blob:{net}; worker-src 'self' {base} blob:; frame-src 'none'; object-src 'none'; frame-ancestors http://127.0.0.1:* http://localhost:* bridge: http://bridge.localhost https://bridge.localhost"
     )
 }
 

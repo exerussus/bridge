@@ -1,7 +1,7 @@
 // Приложения (3.4): список, открытые вкладки, обработчик вызовов из изолированных рамок (most.* → панель → мост).
 // Состояние живёт в модуле: открытые приложения не перезагружаются при переходе на другие вкладки моста.
 import { api, authHeaders, API, onMedia, upload } from './api';
-import { SET, setSet, toast, ui, badgeCount } from './state.svelte';
+import { SET, setSet, toast, ui, badgeCount, titleOf } from './state.svelte';
 import { pickFiles } from './util';
 import { notifyTo } from './notify';
 
@@ -10,6 +10,8 @@ export type AppInfo = {
   ui: boolean; native: boolean; service: boolean; actions: any[]; icon: boolean; perms: string[]; granted: string[];
   state: 'new' | 'changed' | 'ok' | 'unsupported'; unsupported: string; window: any; net: any; opens: any; launch: any; dev: any;
   hash: string; uiStamp: string; entry: string; runningService: any; runningNative: any; lastExit: string;
+  /** 3.7: проверенный издатель (пусто — без подписи), почему подпись не засчитана, адреса в интернете. */
+  publisher: string; publisherFp: string; sigNote: string; network: string[];
 };
 
 export const PERM_LABEL: Record<string, string> = {
@@ -23,11 +25,14 @@ export const PERM_LABEL: Record<string, string> = {
   sessions: 'Сетевые сеансы в канале',
   activity: 'Видеть вашу активность в мосте (без содержимого)',
   'input.capture': 'Захватывать мышь и клавиатуру в своём окне',
+  identity: 'Ваш ключ для этого издателя и подпись входа в его сервис',
 };
 
 export const AP = $state({
   list: [] as AppInfo[],
   errors: [] as { source: string; error: string }[],
+  /** Предложения приложений от соседей (3.6). */
+  offers: [] as any[],
   base: '',
   folder: '',
   loaded: false,
@@ -50,7 +55,8 @@ export const byId = (id: string) => AP.list.find(a => a.id === id);
 export async function loadApps() {
   try {
     const r = await api('GET', 'apps');
-    AP.list = r.list; AP.errors = r.errors; AP.base = r.base; AP.folder = r.folder; AP.loaded = true;
+    AP.list = r.list; AP.errors = r.errors; AP.base = r.base; AP.folder = r.folder; AP.offers = r.offers || []; AP.loaded = true;
+    for (const x of r.signAsks || []) signAsk(x);
     // закрыть вкладки убранных приложений
     AP.open = AP.open.filter(id => byId(id));
     if (AP.active && !byId(AP.active)) { AP.active = AP.open[0] || ''; if (!AP.active) AP.view = 'desk'; }
@@ -182,6 +188,8 @@ export async function handleCall(id: string, m: string, args: any[], ctx?: Ctx):
   switch (m) {
     case 'ready':
       return { id: a.id, name: a.name, version: a.version, node: ui.ov?.node?.node || '', theme: SET.theme || 'dark', granted: [...a.granted], bridge: 'apps@1' };
+    case 'identity.get': need(a, 'identity'); return await api('GET', 'apps/identity?' + new URLSearchParams({ id }));
+    case 'identity.sign': need(a, 'identity'); return await api('POST', 'apps/identity/sign', { id, purpose: String(args[0] || ''), payload: String(args[1] ?? '') });
     case 'store.get': return (await api('GET', 'apps/store?' + new URLSearchParams({ id, key: String(args[0] || '') }))).value;
     case 'store.set': await api('POST', 'apps/store', { id, key: String(args[0] || ''), value: args[1] ?? null }); return true;
     case 'files.pick': {
@@ -295,6 +303,12 @@ export function startApps() {
     else if (m.type === 'toast') toast((m.name ? m.name + ': ' : '') + (m.text || ''));
     else if (m.type === 'activity' && m.e) { for (const id of new Set([...AP.open, ...Object.keys(POPS)])) if (byId(id)?.granted.includes('activity')) emitTo(id, 'activity', m.e); }
     else if (m.type === 'dev' && m.req) devAsk(m);
+    else if (m.type === 'sign' && m.ask) signAsk(m);
+    else if (m.type === 'offer') {
+      if (m.from && m.name) notifyTo('Мост', titleOf(m.from) + ' предлагает приложение «' + m.name + '» ' + (m.version || ''), 'apps');
+      if (m.state === 'done') toast('Приложение получено — откройте его и разрешите', 'ok');
+      loadApps();
+    }
   });
   // открытые приложения со службой держат её живой
   setInterval(() => { for (const id of AP.open) if (byId(id)?.service) api('POST', 'apps/touch', { id }).catch(() => {}); for (const id of Object.keys(POPS)) if (popups(id).length && byId(id)?.service) api('POST', 'apps/touch', { id }).catch(() => {}); }, 20000);
@@ -307,6 +321,23 @@ async function devAsk(m: any) {
   notifyTo('Мост', (m.who || 'Редактор') + ' просит подключиться как «' + m.name + '»', 'apps');
   const ok = confirm((m.who || 'Редактор') + ' просит подключиться к мосту как приложение «' + m.name + '».\n\nРазрешить? Подключение получит права приложения до перезапуска моста.');
   try { await api('POST', 'apps/dev/answer', { req: m.req, ok }); toast(ok ? 'Редактор подключён как «' + m.name + '»' : 'Отказано', ok ? 'ok' : ''); } catch (e: any) { toast(e.message, 'bad'); }
+}
+
+// приложение просит подписать строку вашим ключом (не вход от проверенного издателя) — решает хозяин ПК
+const signAsked = new Set<string>();
+async function signAsk(m: any) {
+  if (signAsked.has(m.ask)) return; signAsked.add(m.ask);
+  notifyTo('Мост', '«' + m.name + '» просит подпись вашим ключом', 'apps');
+  const who = m.publisher ? 'издатель ' + m.publisherFp : 'без подписи издателя';
+  const ok = confirm('«' + m.name + '» (' + who + ') просит подписать вашим ключом.\n\nНазначение: ' + m.purpose + '\nДанные: ' + (m.preview || '—') + '\n\nРазрешить? До перезапуска моста такие подписи этого приложения будут выдаваться без вопроса.');
+  try { await api('POST', 'apps/identity/answer', { ask: m.ask, ok, remember: ok }); } catch (e: any) { toast(e.message, 'bad'); }
+}
+
+/** Принять / отклонить предложение соседа, «Взять у хоста». */
+export async function acceptOffer(offer: string) { try { await api('POST', 'apps/offer/accept', { offer }); await loadApps(); } catch (e: any) { toast(e.message, 'bad'); loadApps(); } }
+export async function declineOffer(offer: string) { try { await api('POST', 'apps/offer/decline', { offer }); await loadApps(); } catch (e: any) { toast(e.message, 'bad'); } }
+export async function takeFrom(peer: string, id: string) {
+  try { await api('POST', 'apps/take', { peer, id }); toast('Беру у ' + titleOf(peer) + '…'); await loadApps(); } catch (e: any) { toast(e.message, 'bad'); }
 }
 
 /** Что идёт в моём канале (для полосы «Идёт сейчас»). */

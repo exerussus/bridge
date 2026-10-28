@@ -25,7 +25,11 @@ pub const FOLDER: &str = "приложения";
 pub const EXT: &str = "most-app";
 const MANIFEST: &str = "app.json";
 /// Права, которые может попросить приложение.
-pub const PERMS: &[&str] = &["files.pick", "files.save", "files.read", "notify", "channel.post", "peers", "mail.send", "sessions", "activity", "input.capture"];
+pub const PERMS: &[&str] = &["files.pick", "files.save", "files.read", "notify", "channel.post", "peers", "mail.send", "sessions", "activity", "input.capture", "identity"];
+/// Подпись издателя в папке или пакете приложения (3.7).
+pub const SIG_FILE: &str = "most-sig.json";
+/// ID, которые приложению брать нельзя (их подписывает сам мост).
+pub const RESERVED_IDS: &[&str] = &["most", "bridge", "system"];
 /// Служба с `run: "open"` гаснет, когда приложение не открыто дольше этого.
 const IDLE_STOP: Duration = Duration::from_secs(90);
 const LOG_LINES: usize = 400;
@@ -54,6 +58,12 @@ pub struct App {
     /// Меняется, когда меняются файлы интерфейса (панель перезагружает открытое).
     pub ui_stamp: String,
     pub unsupported: String,
+    /// Ключ издателя (base64url) — только если подпись пакета проверена; иначе пусто.
+    pub publisher: String,
+    /// Почему подпись не засчитана (для папки разработчика).
+    pub sig_note: String,
+    /// Адреса в интернете, куда можно ходить веб-интерфейсу (connect-src), — из app.json `network`.
+    pub network: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -92,7 +102,7 @@ pub struct Apps {
 pub fn folder(node: &Node) -> PathBuf {
     node.base_dir.join(FOLDER)
 }
-fn data_root(node: &Node) -> PathBuf {
+pub(crate) fn data_root(node: &Node) -> PathBuf {
     node.data_dir.join("apps")
 }
 pub fn data_dir(node: &Node, id: &str) -> PathBuf {
@@ -123,7 +133,7 @@ pub fn base_url(node: &Node) -> String {
     node.urls.read().first().cloned().unwrap_or_default()
 }
 
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 40 && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_') && !id.starts_with('-')
 }
 
@@ -135,6 +145,144 @@ fn platform() -> &'static str {
     } else {
         "linux"
     }
+}
+
+/// `network` в app.json: точные адреса https:// или wss:// (схема, хост, порт), до 8; без *, путей и запросов.
+fn parse_network(v: &Value) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let Some(a) = v.as_array() else {
+        return if v.is_null() { Ok(out) } else { Err("app.json: network — список адресов".into()) };
+    };
+    if a.len() > 8 {
+        return Err("app.json: network — не больше 8 адресов".into());
+    }
+    for x in a {
+        let u = x.as_str().unwrap_or("").trim().trim_end_matches('/').to_lowercase();
+        let rest = u.strip_prefix("https://").or_else(|| u.strip_prefix("wss://"));
+        let ok = rest.map(|r| !r.is_empty() && r.len() <= 200 && r.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == ':' || c == '[' || c == ']') && !r.starts_with('.') && !r.starts_with(':')).unwrap_or(false);
+        if !ok {
+            return Err(format!("app.json: network — «{}»: нужен точный адрес https:// или wss:// (без *, пути и параметров)", x.as_str().unwrap_or("")));
+        }
+        if !out.contains(&u) {
+            out.push(u);
+        }
+    }
+    Ok(out)
+}
+
+/// Что входит в пакет и в подпись: всё, кроме служебного git/npm и отладочного Unity.
+pub fn packable(rel: &str) -> bool {
+    !rel.split('/').any(|s| s == ".git" || s == "node_modules" || s.ends_with("_BurstDebugInformation_DoNotShip") || s.ends_with("_BackUpThisFolder_ButDontShipItWithYourGame"))
+}
+
+fn tree_lines(mut entries: Vec<(String, String)>) -> String {
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut h = Sha256::new();
+    for (rel, sha) in entries {
+        h.update(rel.as_bytes());
+        h.update(b"\t");
+        h.update(sha.as_bytes());
+        h.update(b"\n");
+    }
+    hex::encode(h.finalize())
+}
+
+fn sha_reader(r: &mut impl Read) -> Result<String, String> {
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = r.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(hex::encode(h.finalize()))
+}
+
+/// Отпечаток содержимого приложения для подписи: SHA-256 списка «путь\tsha256» всех файлов (кроме most-sig.json).
+pub fn tree_hash_dir(root: &Path) -> Result<String, String> {
+    let mut e = Vec::new();
+    for w in bridge_core::scanner::walk(root, &[]) {
+        if w.rel == SIG_FILE || !packable(&w.rel) {
+            continue;
+        }
+        let mut f = std::fs::File::open(&w.full).map_err(|x| format!("{}: {}", w.rel, x))?;
+        e.push((w.rel.clone(), sha_reader(&mut f)?));
+    }
+    Ok(tree_lines(e))
+}
+
+/// То же для пакета .most-app; вместе с подписью и app.json из него.
+pub fn tree_hash_zip(p: &Path) -> Result<(String, Value, Value), String> {
+    let f = std::fs::File::open(p).map_err(|e| e.to_string())?;
+    let mut z = zip::ZipArchive::new(std::io::BufReader::new(f)).map_err(|_| "не пакет .most-app".to_string())?;
+    let (mut e, mut sig, mut man) = (Vec::new(), Value::Null, Value::Null);
+    for i in 0..z.len() {
+        let mut x = z.by_index(i).map_err(|e| e.to_string())?;
+        if x.is_dir() {
+            continue;
+        }
+        let rel = x.enclosed_name().map(|p| p.to_string_lossy().replace('\\', "/")).ok_or("в пакете путь наружу")?;
+        if rel == SIG_FILE || rel == MANIFEST {
+            let mut t = String::new();
+            x.read_to_string(&mut t).map_err(|e| e.to_string())?;
+            let v: Value = serde_json::from_str(t.trim_start_matches('\u{feff}')).unwrap_or(Value::Null);
+            if rel == SIG_FILE {
+                sig = v;
+                continue;
+            }
+            man = v;
+            e.push((rel, hex::encode(Sha256::digest(t.as_bytes()))));
+            continue;
+        }
+        if !packable(&rel) {
+            continue;
+        }
+        e.push((rel, sha_reader(&mut x)?));
+    }
+    Ok((tree_lines(e), sig, man))
+}
+
+pub fn sig_message(tree: &str) -> String {
+    format!("most-app-sig/v1\ntree={}", tree)
+}
+
+/// Проверить подпись издателя: Ok(ключ) — подпись верна и совпадает с publisher в app.json (если он указан).
+pub fn check_sig(sig: &Value, tree: &str, manifest: &Value) -> Result<String, String> {
+    let pubk = sig["pub"].as_str().unwrap_or("");
+    if sig["v"] != 1 || pubk.is_empty() {
+        return Err("нет подписи издателя".into());
+    }
+    if sig["tree"].as_str() != Some(tree) {
+        return Err("файлы изменены после подписи".into());
+    }
+    if !crate::identity::verify(pubk, sig_message(tree).as_bytes(), sig["sig"].as_str().unwrap_or("")) {
+        return Err("подпись не сходится".into());
+    }
+    if let Some(declared) = manifest["publisher"].as_str() {
+        if !declared.is_empty() && declared != pubk {
+            return Err("ключ в подписи не тот, что publisher в app.json".into());
+        }
+    }
+    Ok(pubk.to_string())
+}
+
+/// Подписать папку приложения ключом издателя: publisher в app.json + most-sig.json. Возвращает ключ издателя.
+pub fn sign_dir(dir: &Path, sk: &ed25519_dalek::SigningKey) -> Result<String, String> {
+    use ed25519_dalek::Signer;
+    let pubk = crate::identity::b64(sk.verifying_key().as_bytes());
+    let text = std::fs::read_to_string(dir.join(MANIFEST)).map_err(|e| format!("app.json: {}", e))?;
+    let mut m: Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| format!("app.json: {}", e))?;
+    if m["publisher"].as_str() != Some(pubk.as_str()) {
+        m["publisher"] = json!(pubk);
+        std::fs::write(dir.join(MANIFEST), serde_json::to_string_pretty(&m).unwrap() + "\n").map_err(|e| e.to_string())?;
+    }
+    parse_manifest(dir, &std::fs::read_to_string(dir.join(MANIFEST)).unwrap_or_default())?;
+    let tree = tree_hash_dir(dir)?;
+    let sig = crate::identity::b64(&sk.sign(sig_message(&tree).as_bytes()).to_bytes());
+    std::fs::write(dir.join(SIG_FILE), serde_json::to_string_pretty(&json!({ "v": 1, "pub": pubk, "tree": tree, "sig": sig })).unwrap() + "\n").map_err(|e| e.to_string())?;
+    Ok(pubk)
 }
 
 /// Относительный путь внутри приложения: без «..», без абсолютных.
@@ -151,6 +299,10 @@ pub fn parse_manifest(root: &Path, text: &str) -> Result<App, String> {
     if !valid_id(&id) {
         return Err(format!("app.json: id «{}» — латиница в нижнем регистре, цифры, - и _ (до 40)", id));
     }
+    if RESERVED_IDS.contains(&id.as_str()) {
+        return Err(format!("app.json: id «{}» занят мостом — выберите другой", id));
+    }
+    let network = parse_network(&m["network"])?;
     let name = s("name");
     if name.is_empty() || name.chars().count() > 60 {
         return Err("app.json: name — название до 60 знаков".into());
@@ -224,6 +376,7 @@ pub fn parse_manifest(root: &Path, text: &str) -> Result<App, String> {
         icon,
         perms,
         unsupported,
+        network,
         ..Default::default()
     })
 }
@@ -276,7 +429,7 @@ fn in_ui(app: &App, rel: &str) -> bool {
 fn code_hash(app: &App) -> String {
     let mut h = Sha256::new();
     let m = &app.manifest;
-    h.update(json!({ "p": app.perms, "s": m["service"], "n": m["native"], "a": m["actions"], "l": m["launch"], "net": m["net"] }).to_string().as_bytes());
+    h.update(json!({ "p": app.perms, "s": m["service"], "n": m["native"], "a": m["actions"], "l": m["launch"], "net": m["net"], "pub": app.publisher, "nw": app.network }).to_string().as_bytes());
     let mut files = bridge_core::scanner::walk(&app.root, &[]);
     files.sort_by(|a, b| a.rel.cmp(&b.rel));
     let mut buf = vec![0u8; 1 << 20];
@@ -387,6 +540,15 @@ pub fn scan(node: &Arc<Node>) -> bool {
                     let mut app = parse_manifest(&root, &text)?;
                     app.source = src.clone();
                     app.packaged = packaged;
+                    // подпись издателя: у пакета неверная подпись — отказ; у папки — просто «без подписи»
+                    let sig = read_json(&root.join(SIG_FILE));
+                    if !sig.is_null() || app.manifest["publisher"].is_string() {
+                        match tree_hash_dir(&root).and_then(|t| check_sig(&sig, &t, &app.manifest)) {
+                            Ok(p) => app.publisher = p,
+                            Err(e) if packaged => return Err(format!("подпись издателя: {} — пакет не принят", e)),
+                            Err(e) => app.sig_note = e,
+                        }
+                    }
                     app.ui_stamp = fingerprint(&root, |rel| in_ui(&app, rel) || rel == app.icon);
                     app.hash = code_hash(&app);
                     Ok(app)
@@ -592,13 +754,14 @@ pub fn status(node: &Node) -> Value {
                 "window": m["window"], "net": m["net"], "opens": m["opens"], "launch": m["launch"],
                 "dev": if a.packaged { Value::Null } else { m["dev"].clone() },
                 "hash": a.hash, "uiStamp": a.ui_stamp,
+                "publisher": a.publisher, "publisherFp": crate::identity::fingerprint_b64(&a.publisher), "sigNote": a.sig_note, "network": a.network,
                 "runningService": r.and_then(|r| rs(&r.service)), "runningNative": r.and_then(|r| rs(&r.native)),
                 "lastExit": r.map(|r| r.last_exit.clone()).unwrap_or_default(),
             })
         })
         .collect();
     let errors: Vec<Value> = node.apps.errors.lock().iter().map(|(k, v)| json!({ "source": k, "error": v })).collect();
-    json!({ "list": apps, "errors": errors, "folder": folder(node).display().to_string(), "base": base_url(node), "platform": platform() })
+    json!({ "list": apps, "errors": errors, "folder": folder(node).display().to_string(), "base": base_url(node), "platform": platform(), "offers": crate::app_share::incoming(node), "signAsks": crate::identity::pending(node) })
 }
 
 /// Файл интерфейса: только из папки ui (или значок).
@@ -641,6 +804,23 @@ pub fn remove(node: &Arc<Node>, id: &str) -> Result<String, String> {
     let n2 = node.clone();
     tokio::task::spawn_blocking(move || scan(&n2));
     Ok(to.display().to_string())
+}
+
+/// Убрать прежний пакет перед обновлением (в корзину моста; разрешение остаётся — мост спросит снова, если код другой).
+pub fn retire(node: &Arc<Node>, id: &str) -> Result<(), String> {
+    let Some(a) = get(node, id) else { return Ok(()) };
+    if !a.packaged {
+        return Err(format!("«{}» у вас лежит папкой (копия для разработки) — обновите её сами или уберите, тогда примете пакет", a.name));
+    }
+    stop_all(node, id, "приложение обновляется");
+    let name = a.source.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let to = node.folders.trash_dir().join("приложения").join(format!("{}--{}", chrono::Local::now().format("%Y%m%d-%H%M%S"), name));
+    if let Some(d) = to.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&a.source, &to).map_err(|e| format!("не удалось убрать прежнюю версию «{}»: {}", name, e))?;
+    node.info(&format!("[приложения] прежняя версия «{}» {} — в корзину моста", a.name, a.version));
+    Ok(())
 }
 
 /// Положить пакет в папку приложений (перетащили .most-app в окно).
@@ -954,7 +1134,8 @@ pub fn pack(dir: &Path, out: Option<PathBuf>) -> Result<(PathBuf, usize), String
     files.sort_by(|a, b| a.rel.cmp(&b.rel));
     let mut buf = vec![0u8; 1 << 20];
     for w in files {
-        if w.full == out || w.rel.split('/').any(|s| s == ".git" || s == "node_modules") {
+        // не в пакет: служебное git/npm и отладочное Unity, которое не для раздачи
+        if w.full == out || !packable(&w.rel) {
             continue;
         }
         z.start_file(w.rel.as_str(), opt).map_err(|e| e.to_string())?;

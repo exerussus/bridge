@@ -31,7 +31,10 @@ const HELP: &str = "Exerussus.Bridge — узел моста (файлы, общ
   bridge send <сосед> <файл> [путь-у-соседа]   отправить файл
   bridge app new <id> [папка]                   заготовка приложения (веб-интерфейс + SDK)
   bridge app check <папка>                      проверить app.json
-  bridge app pack <папка> [--out файл]          упаковать приложение в .most-app
+  bridge app pack <папка> [--out файл] [--key файл]  упаковать в .most-app (с --key — подписать издателем)
+  bridge app keygen [файл]                      ключ издателя (секрет — в файл, открытый ключ — на экран)
+  bridge app sign <папка> --key <файл>          подписать папку приложения ключом издателя (most-sig.json)
+  bridge app verify <папка|файл.most-app>       проверить подпись издателя
   bridge ignore [add|remove|set|test] …         игнор (--folder id | --mount сосед/id)
 
 Записи:
@@ -417,7 +420,48 @@ fn enc(s: &str) -> String {
 
 /// Приложения без запущенного моста: заготовка, проверка, упаковка.
 fn app_cli(o: &Opts) -> Result<i32, String> {
-    match arg(o, 1, "new | check | pack")? {
+    let key = |o: &Opts| -> Result<Option<ed25519_dalek::SigningKey>, String> {
+        match o.opt.get("key") {
+            Some(f) => {
+                let t = std::fs::read_to_string(f).map_err(|e| format!("ключ издателя {}: {}", f, e))?;
+                Ok(Some(bridge_node::identity::publisher_key(t.lines().find(|l| !l.trim().is_empty() && !l.starts_with('#')).unwrap_or(""))?))
+            }
+            None => Ok(None),
+        }
+    };
+    match arg(o, 1, "new | check | pack | keygen | sign | verify")? {
+        "keygen" => {
+            let file = std::path::PathBuf::from(o.pos.get(2).cloned().unwrap_or_else(|| "publisher.key".into()));
+            if file.exists() {
+                return Err(format!("{} уже есть — не перезаписываю", file.display()));
+            }
+            let seed: [u8; 32] = rand::random();
+            let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+            let pubk = bridge_node::identity::b64(sk.verifying_key().as_bytes());
+            std::fs::write(&file, format!("# Ключ издателя приложений Моста. СЕКРЕТ: не публикуйте и не кладите в пакет.\n# Открытый ключ: {}\n{}\n", pubk, bridge_node::identity::b64(&seed))).map_err(|e| e.to_string())?;
+            println!("Секрет: {} (храните отдельно от проекта)\nОткрытый ключ издателя: {}\nОтпечаток: {}", file.display(), pubk, bridge_node::identity::fingerprint_b64(&pubk));
+            Ok(0)
+        }
+        "sign" => {
+            let dir = std::path::PathBuf::from(arg(o, 2, "папка приложения")?);
+            let sk = key(o)?.ok_or("нужен --key <файл ключа издателя>")?;
+            let pubk = bridge_node::apps::sign_dir(&dir, &sk)?;
+            println!("Подписано: {} — издатель {}", dir.display(), bridge_node::identity::fingerprint_b64(&pubk));
+            Ok(0)
+        }
+        "verify" => {
+            let p = std::path::PathBuf::from(arg(o, 2, "папка или пакет")?);
+            let (tree, sig, man) = if p.is_dir() {
+                let man: Value = serde_json::from_str(&std::fs::read_to_string(p.join("app.json")).map_err(|e| format!("app.json: {}", e))?).map_err(|e| e.to_string())?;
+                let sig: Value = std::fs::read_to_string(p.join(bridge_node::apps::SIG_FILE)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+                (bridge_node::apps::tree_hash_dir(&p)?, sig, man)
+            } else {
+                bridge_node::apps::tree_hash_zip(&p)?
+            };
+            let pubk = bridge_node::apps::check_sig(&sig, &tree, &man)?;
+            println!("Подпись верна: издатель {} ({})", bridge_node::identity::fingerprint_b64(&pubk), pubk);
+            Ok(0)
+        }
         "new" => {
             let id = arg(o, 2, "id приложения")?;
             let dir = std::path::PathBuf::from(o.pos.get(3).cloned().unwrap_or_else(|| id.to_string()));
@@ -435,11 +479,15 @@ fn app_cli(o: &Opts) -> Result<i32, String> {
         "pack" => {
             let dir = std::path::PathBuf::from(arg(o, 2, "папка приложения")?);
             let out = o.opt.get("out").map(std::path::PathBuf::from);
+            if let Some(sk) = key(o)? {
+                let pubk = bridge_node::apps::sign_dir(&dir, &sk)?;
+                println!("Подписано издателем {}", bridge_node::identity::fingerprint_b64(&pubk));
+            }
             let (p, n) = bridge_node::apps::pack(&dir, out)?;
             println!("Упаковано: {} ({} файлов)", p.display(), n);
             Ok(0)
         }
-        x => Err(format!("bridge app {}: нет такой команды (new, check, pack)", x)),
+        x => Err(format!("bridge app {}: нет такой команды (new, check, pack, keygen, sign, verify)", x)),
     }
 }
 

@@ -33,6 +33,8 @@ namespace Exerussus.Most
         public MostChannel Channel { get; private set; } = new MostChannel();
         public MostSession Session { get; }
         public MostActivity Activity { get; }
+        /// <summary>Ключ пользователя для издателя приложения (право identity).</summary>
+        public MostIdentity Identity { get; }
         /// <summary>Имитация плохой сети (входящее). Меняется на лету.</summary>
         public MostSimulation Simulation { get; set; } = new MostSimulation();
 
@@ -53,6 +55,7 @@ namespace Exerussus.Most
             this.link = link;
             Session = new MostSession(this);
             Activity = new MostActivity(this);
+            Identity = new MostIdentity(this);
             link.Open(inbox);
         }
 
@@ -238,6 +241,23 @@ namespace Exerussus.Most
             try { a(); }
             catch (Exception e) { UnityEngine.Debug.LogException(e); }
         }
+    }
+
+    /// <summary>
+    /// Ключ пользователя (3.7). Приложение видит не основной ключ, а свой для издателя, и только просит подписать:
+    /// мост подставляет app, pub (издатель), purpose и ts. Подписанная строка:
+    /// <code>most-sign/v1\napp=&lt;id&gt;\npub=&lt;издатель&gt;\npurpose=&lt;назначение&gt;\nts=&lt;UTC&gt;\n&lt;payload&gt;</code>
+    /// «login» у приложения с проверенным издателем подписывается без вопроса, остальное — после согласия хозяина ПК.
+    /// </summary>
+    public sealed class MostIdentity
+    {
+        readonly MostClient c;
+        internal MostIdentity(MostClient c) { this.c = c; }
+
+        public async Task<MostIdentityInfo> Get() => MostIdentityInfo.From(await c.Call("identity.get"));
+
+        /// <summary>Подписать payload (до 16 КБ). purpose — латиница в нижнем регистре; activity, presence, receipt, revoke — только для моста.</summary>
+        public async Task<MostSignature> Sign(string purpose, string payload) => MostSignature.From(await c.Call("identity.sign", purpose ?? "", payload ?? ""));
     }
 
     /// <summary>

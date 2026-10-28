@@ -126,6 +126,13 @@
     _raw: { call: call, on: on },
     session: session,
     activity: activity,
+    /** Ключ пользователя (право identity): свой ключ для издателя приложения и подпись строки. */
+    identity: {
+      /** {key, fingerprint, name, publisher, verified, rotated: [{signed, sig, key}]} */
+      get: function () { return call('identity.get'); },
+      /** Подписать: мост подставит app, pub, purpose, ts → {key, sig, signed}. «login» у проверенного издателя — без вопроса. */
+      sign: function (purpose, payload) { return call('identity.sign', String(purpose || ''), payload == null ? '' : String(payload)); },
+    },
     /** Сведения о приложении и мосте: {id, name, version, node, theme, granted}. */
     ready: function () { return call('ready'); },
     /** События: theme, file (файл перетащили на вкладку), visible. */

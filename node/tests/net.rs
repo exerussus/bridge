@@ -1855,7 +1855,7 @@ async fn app_sessions_two_bridges() {
         let d = apps::folder(n).join("mice");
         std::fs::create_dir_all(d.join("ui")).unwrap();
         std::fs::write(d.join("ui/index.html"), "x").unwrap();
-        std::fs::write(d.join("app.json"), r#"{"id":"mice","name":"Мыши","version":"1","ui":"ui/index.html","net":{"proto":1,"max":4},"permissions":["sessions","activity"]}"#).unwrap();
+        std::fs::write(d.join("app.json"), r#"{"id":"mice","name":"Мыши","version":"1","ui":"ui/index.html","net":{"proto":1,"max":4},"permissions":["sessions","activity","identity"]}"#).unwrap();
         apps::scan(n);
         apps::allow(n, "mice", None).unwrap();
     }
@@ -1925,6 +1925,12 @@ async fn app_sessions_two_bridges() {
     assert_eq!(jb["members"].as_array().unwrap().len(), 2);
     let mj = wait_ev(&mut a, "member").await;
     assert_eq!(mj["op"], "join");
+    // ключ участника для издателя (право identity) — у хоста в событии и у вошедшего в снимке
+    let kb = bridge_node::identity::get(&stand, "mice").unwrap()["key"].clone();
+    let ka = bridge_node::identity::get(&dev, "mice").unwrap()["key"].clone();
+    assert_eq!(mj["m"]["key"], kb, "{}", mj);
+    assert_eq!(jb["members"][0]["key"], ka, "{}", jb);
+    assert_ne!(ka, kb);
     // данные: клиент → хосту (надёжно)
     let mut f = vec![0u8, 0, 0];
     f.extend_from_slice(b"hi");
@@ -2044,5 +2050,175 @@ async fn tile_status_presets() {
     assert!(tile::own_style(&dev).get("stText").is_none() && tile::own_st_img(&dev).is_none());
     assert_eq!(tile::presets(&dev)["active"], "");
     assert!(tile::apply_preset(&dev, "нет").is_err());
+    net.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn app_share_offer_accept_and_guards() {
+    use bridge_node::{app_share, apps};
+    let mut net = pair();
+    net.start().await;
+    let (dev, stand) = (net.n("dev").clone(), net.n("stand").clone());
+    let d = apps::folder(&dev).join("gift");
+    std::fs::create_dir_all(d.join("ui")).unwrap();
+    std::fs::write(d.join("ui/index.html"), "подарок").unwrap();
+    std::fs::create_dir_all(d.join("bin/Game_BurstDebugInformation_DoNotShip")).unwrap();
+    std::fs::write(d.join("bin/Game_BurstDebugInformation_DoNotShip/x.pdb"), "отладка").unwrap();
+    std::fs::write(d.join("app.json"), r#"{"id":"gift","name":"Подарок","version":"1.0.0","ui":"ui/index.html","permissions":["notify"]}"#).unwrap();
+    apps::scan(&dev);
+    // взять без общего сеанса — нельзя
+    let e = app_share::take(&stand, "dev", "gift").await.unwrap_err();
+    assert!(e.contains("одном канале"), "{}", e);
+    // предложить → у соседа предложение → принять → пакет в «приложениях», ждёт разрешения
+    let r = app_share::share(&dev, "gift", &["stand".to_string()]).await.unwrap();
+    assert!(r["results"]["stand"].as_str().unwrap().contains("предложено"), "{}", r);
+    let inc = app_share::incoming(&stand);
+    assert_eq!(inc.len(), 1);
+    let offer = inc[0]["offer"].as_str().unwrap().to_string();
+    // чужому — не отдаётся, устаревшее — тоже
+    assert!(app_share::served(&dev, &offer, "dev").is_none());
+    assert!(app_share::served(&dev, "deadbeefdeadbeefdeadbeef", "stand").is_none());
+    let p = stand.cfg.read().peer("dev").cloned().unwrap();
+    let tmp = stand.data_dir.join("bad.part");
+    assert!(stand.client_for(&p).app_package("deadbeefdeadbeefdeadbeef", &tmp, 1 << 20, "x").await.is_err());
+    app_share::accept(&stand, &offer).unwrap();
+    for _ in 0..100 {
+        if app_share::incoming(&stand)[0]["state"] != "download" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(app_share::incoming(&stand)[0]["state"], "done", "{}", app_share::incoming(&stand)[0]);
+    apps::scan(&stand);
+    let a = apps::get(&stand, "gift").expect("приложение у соседа");
+    assert!(a.packaged && a.version == "1.0.0");
+    assert!(!apps::consent_ok(&stand, &a), "без разрешения не запускается");
+    // отладочное Unity в пакет не попало
+    let f = std::fs::File::open(&a.source).unwrap();
+    let z = zip::ZipArchive::new(f).unwrap();
+    assert!(z.file_names().all(|n| !n.contains("DoNotShip")), "{:?}", z.file_names().collect::<Vec<_>>());
+    // share: false — не передаётся
+    std::fs::write(d.join("app.json"), r#"{"id":"gift","name":"Подарок","version":"1.0.1","ui":"ui/index.html","share":false}"#).unwrap();
+    apps::scan(&dev);
+    assert!(app_share::share(&dev, "gift", &["stand".to_string()]).await.unwrap_err().contains("запрещает"));
+    net.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn identity_keys_signatures_and_publisher() {
+    use bridge_node::{app_share, apps, identity};
+    let mut net = pair();
+    net.start().await;
+    let (dev, stand) = (net.n("dev").clone(), net.n("stand").clone());
+    // издатель и подписанное приложение с правом identity
+    let pk = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+    let other = ed25519_dalek::SigningKey::from_bytes(&[8u8; 32]);
+    let d = apps::folder(&dev).join("pets");
+    std::fs::create_dir_all(d.join("ui")).unwrap();
+    std::fs::write(d.join("ui/index.html"), "питомцы").unwrap();
+    std::fs::write(d.join("app.json"), r#"{"id":"pets","name":"Питомцы","version":"1.0.0","ui":"ui/index.html","permissions":["identity","sessions"],"network":["https://pets.example.com"]}"#).unwrap();
+    let pubk = apps::sign_dir(&d, &pk).unwrap();
+    apps::scan(&dev);
+    let a = apps::get(&dev, "pets").unwrap();
+    assert_eq!(a.publisher, pubk, "подпись проверена: {}", a.sig_note);
+    assert_eq!(a.network, vec!["https://pets.example.com".to_string()]);
+    // без разрешения — нет ключа
+    assert!(identity::get(&dev, "pets").is_err());
+    apps::allow(&dev, "pets", None).unwrap();
+    let me = identity::get(&dev, "pets").unwrap();
+    let key = me["key"].as_str().unwrap().to_string();
+    assert_eq!(key.len(), 43);
+    assert_eq!(me["verified"], true);
+    // ключ для издателя отличается от основного
+    assert_ne!(identity::status(&dev)["key"], me["key"]);
+    // вход — без вопроса; подпись проверяется
+    let s = identity::sign(&dev, "pets", "login", "{\"nonce\":\"abc\"}").await.unwrap();
+    let signed = s["signed"].as_str().unwrap();
+    assert!(signed.starts_with(&format!("most-sign/v1\napp=pets\npub={}\npurpose=login\nts=", pubk)), "{}", signed);
+    assert!(signed.ends_with("\n{\"nonce\":\"abc\"}"));
+    assert!(identity::verify(&key, signed.as_bytes(), s["sig"].as_str().unwrap()));
+    // зарезервированное назначение — отказ
+    assert!(identity::sign(&dev, "pets", "presence", "x").await.unwrap_err().contains("только сам мост"));
+    // другое назначение — спросить хозяина; ответ «да, запомнить» → дальше без вопроса
+    let d2 = dev.clone();
+    let waiter = tokio::spawn(async move { identity::sign(&d2, "pets", "link-key", "k2").await });
+    let mut asked = None;
+    for _ in 0..50 {
+        if let Some(x) = identity::pending(&dev).into_iter().next() {
+            asked = Some(x);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let asked = asked.expect("вопрос хозяину");
+    assert_eq!(asked["purpose"], "link-key");
+    identity::answer(&dev, asked["ask"].as_str().unwrap(), true, true).unwrap();
+    assert!(waiter.await.unwrap().is_ok());
+    assert!(identity::sign(&dev, "pets", "link-key", "k3").await.is_ok(), "запомнено до перезапуска");
+    // резервная копия: смена ключа → восстановление тем же паролем → прежний ключ для издателя
+    let backup = identity::export(&dev, "пароль-123").unwrap();
+    assert!(identity::export(&dev, "short").is_err());
+    identity::rotate(&dev).unwrap();
+    let rotated = identity::get(&dev, "pets").unwrap();
+    assert_ne!(rotated["key"], me["key"]);
+    let r0 = &rotated["rotated"][0];
+    assert!(identity::verify(r0["key"].as_str().unwrap(), r0["signed"].as_str().unwrap().as_bytes(), r0["sig"].as_str().unwrap()), "переход подписан старым ключом");
+    assert!(r0["signed"].as_str().unwrap().contains("purpose=revoke"));
+    assert!(identity::import(&dev, &backup, "не тот").is_err());
+    identity::import(&dev, &backup, "пароль-123").unwrap();
+    assert_eq!(identity::get(&dev, "pets").unwrap()["key"], me["key"]);
+    // у разных ПК — разные ключи; ключ в сеансе
+    // подпись пакета: изменённый пакет не принимается, другой издатель — тоже
+    let r = app_share::share(&dev, "pets", &["stand".to_string()]).await.unwrap();
+    assert!(r["results"]["stand"].as_str().unwrap().contains("предложено"), "{}", r);
+    let offer = app_share::incoming(&stand)[0].clone();
+    assert_eq!(offer["publisher"], pubk);
+    app_share::accept(&stand, offer["offer"].as_str().unwrap()).unwrap();
+    for _ in 0..100 {
+        if app_share::incoming(&stand)[0]["state"] != "download" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(app_share::incoming(&stand)[0]["state"], "done", "{}", app_share::incoming(&stand)[0]);
+    apps::scan(&stand);
+    assert_eq!(apps::get(&stand, "pets").unwrap().publisher, pubk, "издатель проверен и у соседа");
+    apps::allow(&stand, "pets", None).unwrap();
+    assert_ne!(identity::get(&stand, "pets").unwrap()["key"], me["key"], "у другого ПК — свой ключ");
+    // тот же id, другой издатель → не принят
+    std::fs::write(d.join("app.json"), r#"{"id":"pets","name":"Питомцы","version":"1.1.0","ui":"ui/index.html","permissions":["identity","sessions"]}"#).unwrap();
+    apps::sign_dir(&d, &other).unwrap();
+    apps::scan(&dev);
+    app_share::share(&dev, "pets", &["stand".to_string()]).await.unwrap();
+    let offer2 = app_share::incoming(&stand).into_iter().find(|o| o["version"] == "1.1.0").unwrap();
+    app_share::accept(&stand, offer2["offer"].as_str().unwrap()).unwrap();
+    for _ in 0..100 {
+        let o = app_share::incoming(&stand).into_iter().find(|o| o["version"] == "1.1.0").unwrap();
+        if o["state"] != "download" {
+            assert_eq!(o["state"], "error");
+            assert!(o["error"].as_str().unwrap().contains("другим издателем"), "{}", o);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(apps::get(&stand, "pets").unwrap().version, "1.0.0");
+    // пакет с испорченной подписью в папке — не принят
+    let bad = apps::folder(&stand).join("bad.most-app");
+    let t = stand.data_dir.join("tamper");
+    std::fs::create_dir_all(t.join("ui")).unwrap();
+    for f in ["app.json", "most-sig.json", "ui/index.html"] {
+        std::fs::copy(d.join(f), t.join(f)).unwrap();
+    }
+    std::fs::write(t.join("app.json"), std::fs::read_to_string(d.join("app.json")).unwrap().replace("\"pets\"", "\"pets2\"")).unwrap();
+    std::fs::write(t.join("ui/index.html"), "подмена").unwrap();
+    apps::pack(&t, Some(bad.clone())).unwrap();
+    apps::scan(&stand);
+    let st = apps::status(&stand);
+    let e = st["errors"].as_array().unwrap().iter().find(|e| e["source"] == "bad.most-app").cloned().unwrap_or_default();
+    assert!(e["error"].as_str().unwrap_or("").contains("подпись издателя"), "{}", st["errors"]);
+    // зарезервированный id
+    assert!(apps::parse_manifest(&d, r#"{"id":"most","name":"x","ui":"ui/index.html"}"#).unwrap_err().contains("занят мостом"));
+    assert!(apps::parse_manifest(&d, r#"{"id":"x","name":"x","ui":"ui/index.html","network":["https://*.evil.com"]}"#).is_err());
+    assert!(apps::parse_manifest(&d, r#"{"id":"x","name":"x","ui":"ui/index.html","network":["http://plain.com"]}"#).is_err());
     net.stop().await;
 }

@@ -38,6 +38,10 @@
       <div class="small muted">{a.state === 'changed' ? 'Приложение изменилось — разрешите заново' : 'Новое приложение в папке «приложения»'}{a.author ? ' · ' + a.author : ''} · {a.packaged ? 'пакет .most-app' : 'папка'}</div></div>
   </div>
   {#if a.description}<p class="small" style="margin:10px 0 0">{a.description}</p>{/if}
+  <div class="small" style="margin-top:10px">Издатель: {#if a.publisher}<b class="mono">{a.publisherFp}</b> <span class="muted">— подпись проверена</span>{:else}<span class="muted">без подписи{a.sigNote ? ' (' + a.sigNote + ')' : ''}</span>{/if}</div>
+  {#if a.network?.length}
+    <div class="pill warn" style="display:block;margin-top:8px;line-height:1.5">Ходит в интернет: <span class="mono">{a.network.join(', ')}</span>. Всё, что приложение знает (в том числе вашу активность, если дадите это право), оно может отправить туда.</div>
+  {/if}
   {#if runs.length}
     <div class="pill warn" style="display:block;margin-top:12px;line-height:1.5">Запустит на этом ПК: <b>{runs.join('; ')}</b>. Это программа из пакета — разрешайте, только если доверяете автору. Отпечаток: <span class="mono">{a.hash.slice(0, 12)}</span></div>
   {/if}

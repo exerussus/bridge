@@ -131,6 +131,8 @@ namespace Exerussus.Most
                 case "notify": return Http(HttpMethod.Post, "notify", new Dictionary<string, object> { ["text"] = A(0) as string ?? "" });
                 case "toast": return Http(HttpMethod.Post, "toast", new Dictionary<string, object> { ["text"] = A(0) as string ?? "" });
                 case "ticket": return Http(HttpMethod.Get, "ticket?t=" + Uri.EscapeDataString(A(0) as string ?? ""), null);
+                case "identity.get": return Http(HttpMethod.Get, "identity", null);
+                case "identity.sign": return Http(HttpMethod.Post, "identity/sign", new Dictionary<string, object> { ["purpose"] = A(0) as string ?? "", ["payload"] = A(1) as string ?? "" });
                 default: return Task.FromException<object>(new MostException("нет такого вызова: " + method));
             }
         }

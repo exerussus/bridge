@@ -3,8 +3,9 @@
   // вкладками. Веб-интерфейс — изолированная рамка; своё окно (Unity и т. п.) — панель управления; кнопки — форма.
   import { api } from '../lib/api';
   import { toast, openModal, SET, ui, titleOf } from '../lib/state.svelte';
-  import { AP, byId, ordered, reorder, openApp, closeApp, reloadApp, popout, frameSrc, sandboxOf, allowOf, onFrameMessage, emitTo, startApps, closeNet, loadSessions, importPackages, loadApps, PERM_LABEL, type AppInfo } from '../lib/apps.svelte';
+  import { AP, byId, ordered, reorder, openApp, closeApp, reloadApp, popout, frameSrc, sandboxOf, allowOf, onFrameMessage, emitTo, startApps, closeNet, loadSessions, importPackages, acceptOffer, declineOffer, takeFrom, loadApps, PERM_LABEL, type AppInfo } from '../lib/apps.svelte';
   import AppConsent from '../modals/AppConsent.svelte';
+  import AppShare from '../modals/AppShare.svelte';
   import Gi from '../components/Gi.svelte';
 
   startApps();
@@ -25,6 +26,22 @@
     return () => { on = false; clearTimeout(t); };
   });
   const liveList = $derived(((live?.sessions || []) as any[]).filter(s => s.room === live?.channel?.room));
+  const newOffers = $derived(AP.offers.filter(o => o.state === 'new').length);
+  const takingNow = (id: string) => AP.offers.some(o => o.id === id && o.state === 'download');
+  // у хоста другая версия протокола или приложение новее — войти не выйдет, предложим взять у хоста
+  function needsUpdate(a: AppInfo, s: any): boolean {
+    if (s.joinable) return false;
+    const mine = JSON.stringify(a.net?.proto ?? null), theirs = JSON.stringify(s.proto ?? null);
+    return mine !== theirs || (!!s.version && s.version !== a.version && s.count < s.max);
+  }
+  const mb = (n: number) => n >= 1 << 20 ? (n / (1 << 20)).toFixed(n >= 100 << 20 ? 0 : 1) + ' МБ' : Math.max(1, Math.round(n / 1024)) + ' КБ';
+  function offerNote(o: any): string {
+    if (o.state === 'error') return o.error;
+    if (o.state === 'done') return 'получено — откройте и разрешите';
+    if (o.have?.folder) return 'у вас папка разработчика — принять не выйдет';
+    if (o.have) return o.have.version === o.version ? 'у вас та же версия' : 'обновление с ' + o.have.version;
+    return 'новое';
+  }
   function joinLive(s: any) {
     const a = byId(s.app);
     if (!a) { toast('У вас нет приложения «' + s.app + '» — попросите хозяина поделиться им', 'bad'); return; }
@@ -106,7 +123,7 @@
 <div class="apps" role="region" aria-label="Приложения" ondragover={e => { if ([...(e.dataTransfer?.types || [])].includes('Files')) { e.preventDefault(); dropHover = true; } }} ondragleave={() => (dropHover = false)} ondrop={onDrop}>
   {#if AP.view === 'app' && act}
     <div class="apptabs">
-      <button class="b sm" onclick={() => (AP.view = 'desk')}>‹ Все приложения</button>
+      <button class="b sm" style="min-width:178px" title={newOffers ? 'Соседи предлагают приложения: ' + newOffers : ''} onclick={() => (AP.view = 'desk')}>‹ Все приложения{#if newOffers}<b class="cnt red">{newOffers}</b>{/if}</button>
       {#each AP.open as id (id)}
         {@const a = byId(id)}
         {#if a}
@@ -174,6 +191,26 @@
       {#if AP.open.length}<button class="b pri" onclick={() => (AP.view = 'app')}>Открытые · {AP.open.length}</button>{/if}
       <span class="small muted grow" style="text-align:right">Щелчок — открыть · правая кнопка — меню · перетащите, чтобы переставить</span>
     </div>
+    {#if AP.offers.length}
+      <div class="card alive aoffers">
+        <div class="plbl" style="margin:0 0 6px">Предлагают соседи</div>
+        {#each AP.offers as o (o.offer)}
+          <div class="row small alrow">
+            <span class="appic sm" style="--h:{hue(o.id)}">{(o.name || o.id).slice(0, 2)}</span>
+            <b>{o.name}</b><span class="muted">{o.version} · от {titleOf(o.from)} · {mb(o.size)}{o.kinds?.native || o.kinds?.service || o.kinds?.actions ? ' · с программой' : ''} · {o.publisher ? 'издатель ' + o.publisherFp : 'без подписи'}</span>
+            <span class="muted ofnote" class:bad={o.state === 'error'} title={offerNote(o)}>{offerNote(o)}</span>
+            <div class="grow"></div>
+            {#if o.state === 'done'}
+              <button class="b sm pri" style="min-width:96px" onclick={() => { const a = byId(o.id); if (a) open(a); declineOffer(o.offer); }}>Открыть</button>
+              <button class="b sm" style="min-width:96px" onclick={() => declineOffer(o.offer)}>Скрыть</button>
+            {:else}
+              <button class="b sm pri" style="min-width:96px" disabled={o.state === 'download' || o.have?.folder} onclick={() => acceptOffer(o.offer)}>{o.state === 'download' ? 'Скачиваю…' : o.state === 'error' ? 'Ещё раз' : 'Принять'}</button>
+              <button class="b sm" style="min-width:96px" disabled={o.state === 'download'} onclick={() => declineOffer(o.offer)}>Отклонить</button>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
     {#if liveList.length}
       <div class="card alive">
         <div class="plbl" style="margin:0 0 6px">Идёт сейчас в канале «{live.channel.title}»</div>
@@ -181,9 +218,11 @@
           {@const a = byId(s.app)}
           <div class="row small alrow">
             <span class="appic sm" style="--h:{hue(s.app)}">{#if a?.icon}<img src={'/apps/' + encodeURIComponent(s.app) + '/icon'} alt="" />{:else}{(a?.name || s.app).slice(0, 2)}{/if}</span>
-            <b>{a?.name || s.app}</b><span class="muted">хост {titleOf(s.host)} · {s.count}/{s.max}{s.transport === 'external' ? ' · свой сервер' : ''}{s.members?.length ? ' · ' + s.members.join(', ') : ''}</span>
+            <b>{a?.name || s.name || s.app}</b><span class="muted">{s.version ? s.version + ' · ' : ''}хост {titleOf(s.host)} · {s.count}/{s.max}{s.transport === 'external' ? ' · свой сервер' : ''}{s.members?.length ? ' · ' + s.members.join(', ') : ''}</span>
             <div class="grow"></div>
-            {#if !a}<span class="muted">нет у вас</span>{:else if AP.open.includes(a.id)}<button class="b sm" onclick={() => { AP.active = a.id; AP.view = 'app'; }}>Открыто</button>{:else}<button class="b sm pri" onclick={() => joinLive(s)}>Войти</button>{/if}
+            {#if !a}<button class="b sm pri" style="min-width:150px" disabled={takingNow(s.app)} onclick={() => takeFrom(s.host, s.app)}>{takingNow(s.app) ? 'Скачиваю…' : 'Взять у ' + titleOf(s.host)}</button>
+            {:else if needsUpdate(a, s)}<button class="b sm pri" style="min-width:150px" disabled={takingNow(s.app) || !a.packaged} title={a.packaged ? '' : 'у вас папка разработчика — обновите её сами'} onclick={() => takeFrom(s.host, s.app)}>{takingNow(s.app) ? 'Скачиваю…' : 'Обновить у хоста'}</button>
+            {:else if AP.open.includes(a.id)}<button class="b sm" onclick={() => { AP.active = a.id; AP.view = 'app'; }}>Открыто</button>{:else}<button class="b sm pri" onclick={() => joinLive(s)}>Войти</button>{/if}
           </div>
         {/each}
       </div>
@@ -225,11 +264,12 @@
   {#if a}
     <div class="amenu" role="menu" tabindex="-1" style="left:{Math.min(menu.x, innerWidth - 250)}px;top:{Math.min(menu.y, innerHeight - 340)}px" onclick={e => e.stopPropagation()} onkeydown={() => {}}>
       <button role="menuitem" onclick={() => open(a)}>Открыть</button>
-      {#if a.ui && a.state === 'ok'}<button role="menuitem" onclick={() => { menu = null; openApp(a.id); popout(a.id); }}>Открыть в отдельном окне</button>{/if}
+      {#if a.ui && a.state === 'ok'}<button role="menuitem" onclick={() => { const id = a.id; menu = null; openApp(id); popout(id); }}>Открыть в отдельном окне</button>{/if}
       {#if a.native && a.state === 'ok'}{#if a.runningNative}<button role="menuitem" onclick={() => call('apps/stop', { id: a.id, kind: 'native' })}>Закрыть своё окно</button>{:else}<button role="menuitem" onclick={() => call('apps/start', { id: a.id, kind: 'native' })}>Запустить своё окно</button>{/if}{/if}
       {#if a.service && a.state === 'ok'}{#if a.runningService}<button role="menuitem" onclick={() => call('apps/stop', { id: a.id, kind: 'service' }, 'Служба остановлена')}>Остановить службу</button>{:else}<button role="menuitem" onclick={() => call('apps/start', { id: a.id, kind: 'service' }, 'Служба запущена')}>Запустить службу</button>{/if}{/if}
       <button role="menuitem" onclick={() => showLog(a.id)}>Журнал</button>
-      <button role="menuitem" onclick={() => { menu = null; openModal(AppConsent, { id: a.id }); }}>Права и о приложении…</button>
+      <button role="menuitem" onclick={() => { const id = a.id; menu = null; openModal(AppShare, { id }); }}>Отправить соседям…</button>
+      <button role="menuitem" onclick={() => { const id = a.id; menu = null; openModal(AppConsent, { id }); }}>Права и о приложении…</button>
       <button role="menuitem" data-open="apps" onclick={() => (menu = null)}>Показать папку приложений</button>
       {#if a.state === 'ok'}<button role="menuitem" onclick={() => { closeApp(a.id); call('apps/revoke', { id: a.id }, 'Разрешение отозвано'); }}>Отозвать разрешение</button>{/if}
       <i class="msep"></i>
@@ -273,6 +313,9 @@
   .aout.bad { color: var(--warn); }
   .aerr { margin-bottom: 12px; border-color: rgba(255,181,71,.4); }
   .alive { margin-bottom: 14px; border-color: rgba(56,225,240,.3); }
+  .aoffers { border-color: rgba(255,196,77,.35); }
+  .ofnote { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ofnote.bad { color: var(--bad, #ff6b7a); }
   .alrow { gap: 10px; align-items: center; padding: 4px 0; }
   .aempty { max-width: 640px; }
   .adrop { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 20px; border: 2px dashed var(--acc, #38E1F0); border-radius: 16px; background: rgba(11,12,26,.7); pointer-events: none; font-weight: 600; }

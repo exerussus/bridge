@@ -33,6 +33,9 @@ namespace Exerussus.Most
         public string Node;
         /// <summary>Подпись: имя ПК и, если задано, имя экземпляра.</summary>
         public string Name;
+        /// <summary>Ключ участника для издателя этого приложения (base64url), если у приложения есть право identity.
+        /// Со слов его моста: надёжен только ключ, подтверждённый входом на вашем сервере.</summary>
+        public string Key;
         public bool IsHost => Cid == MostTo.Host;
 
         internal static MostMember From(object o) => new MostMember
@@ -40,6 +43,7 @@ namespace Exerussus.Most
             Cid = (ushort)MostJson.Long(o, "cid"),
             Node = MostJson.Str(o, "node"),
             Name = MostJson.Str(o, "name"),
+            Key = MostJson.Str(o, "key"),
         };
 
         public override string ToString() => Name + " #" + Cid;
@@ -129,6 +133,37 @@ namespace Exerussus.Most
         public byte[] ToArray() { var b = new byte[Payload.Count]; Buffer.BlockCopy(Payload.Array, Payload.Offset, b, 0, b.Length); return b; }
         public string Text() => Encoding.UTF8.GetString(Payload.Array, Payload.Offset, Payload.Count);
         public T Json<T>() => UnityEngine.JsonUtility.FromJson<T>(Text());
+    }
+
+    /// <summary>Ключ пользователя для издателя приложения (Identity.Get).</summary>
+    [Serializable]
+    public sealed class MostIdentityInfo
+    {
+        /// <summary>Открытый ключ Ed25519, base64url (43 знака). ID игрока у вас: например, most:&lt;Key&gt;.</summary>
+        public string Key;
+        /// <summary>Отпечаток для людей: a1b2-c3d4-e5f6-0718.</summary>
+        public string Fingerprint;
+        public string Name;
+        /// <summary>Ключ издателя, если подпись пакета проверена; иначе пусто (приложение из папки).</summary>
+        public string Publisher;
+        public bool Verified;
+        /// <summary>Переходы со старых ключей: строки, подписанные прежним ключом (purpose=revoke).</summary>
+        public List<MostSignature> Rotated = new List<MostSignature>();
+
+        internal static MostIdentityInfo From(object o)
+        {
+            var r = new MostIdentityInfo { Key = MostJson.Str(o, "key"), Fingerprint = MostJson.Str(o, "fingerprint"), Name = MostJson.Str(o, "name"), Publisher = MostJson.Str(o, "publisher"), Verified = MostJson.Bool(o, "verified") };
+            if (MostJson.Get(o, "rotated") is List<object> l) foreach (var x in l) r.Rotated.Add(MostSignature.From(x));
+            return r;
+        }
+    }
+
+    /// <summary>Подпись (Identity.Sign): Signed — ровно подписанная строка, её и проверяйте на сервере.</summary>
+    [Serializable]
+    public sealed class MostSignature
+    {
+        public string Key, Sig, Signed;
+        internal static MostSignature From(object o) => new MostSignature { Key = MostJson.Str(o, "key"), Sig = MostJson.Str(o, "sig"), Signed = MostJson.Str(o, "signed") };
     }
 
     /// <summary>Ошибка от моста (нет права, сеанс полон, не в канале…). Текст — для человека.</summary>

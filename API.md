@@ -276,7 +276,9 @@ requests.post(B + "ui", json={"action": "join", "channel": "Семья"}, header
 - `ui` — вход веб-интерфейса (`ui/index.html`); отдаются только файлы из его папки;
 - `native {cmd, args}` — своё окно (программа внутри приложения); `service {cmd, args, http, run: "open"|"always"}` — фоновая служба;
 - `actions [{id, title, run, params: [{id, title, type: text|number|select, options, default}], confirm}]` — кнопки; `run` — программа из пакета и аргументы, `{параметр}` подставляется отдельным аргументом, без оболочки; до 2 минут, вывод до 64 КБ;
-- `permissions`: `files.pick`, `files.save`, `files.read`, `notify`, `channel.post`, `peers`, `mail.send`, `sessions`, `activity`, `input.capture`;
+- `permissions`: `files.pick`, `files.save`, `files.read`, `notify`, `channel.post`, `peers`, `mail.send`, `sessions`, `activity`, `input.capture`, `identity` (3.7);
+- `publisher` — ключ издателя (ставит `bridge app sign`), `network` — адреса в интернете (3.7);
+- `share: false` — не передавать соседям (3.6);
 - `net {proto, max, transport: "bridge"|"external", leaveWithChannel}` — сетевое приложение (см. «Сеансы»); приложению с одним `net` (без ui, native и actions) окно не нужно — к нему подключаются из редактора или своей программы;
 - `window {w, h}`, `platforms ["windows"…]`, `dev` (адрес сервера разработки для папки), `launch`, `opens` — заделы.
 
@@ -293,6 +295,69 @@ requests.post(B + "ui", json={"action": "join", "channel": "Семья"}, header
 SDK веб-интерфейса (`window.most`): `ready()`, `on("theme"|"file", f)`, `store.get/set`, `files.pick(opts)`, `files.save(name, data)`, `service.fetch(path, init)`, `service.status()`, `service.restart()`, `notify(text)`, `toast(text)`, `window.title(t)`, `window.badge(n)`, `window.popout()`; с 3.5 — `session.*` и `activity.*` (см. «Сеансы»).
 
 Командная строка: `bridge app new <id> [папка]`, `bridge app check <папка>`, `bridge app pack <папка> [--out файл]`.
+
+### Ключ пользователя и подпись издателя (3.7)
+
+**Ключ пользователя.** Это Ed25519, секрет лежит в `bridge-data/identity/key` (в Windows — под DPAPI).
+- Отпечаток для людей: первые 8 байт SHA-256 открытого ключа, `a1b2-c3d4-e5f6-0718`.
+- Ключи и подписи передаются в base64url без `=`.
+- Приложению — свой ключ для издателя: `HKDF-SHA256(salt="most-identity/v1", ikm=секрет, info="publisher:<ключ издателя>" | "publisher:-")` → 32 байта → Ed25519.
+
+**Подписываемая строка** (байты UTF-8, поля через `\n`):
+
+```
+most-sign/v1
+app=<id приложения>
+pub=<ключ издателя, если подпись пакета проверена; иначе пусто>
+purpose=<назначение>
+ts=<UTC, вид 2026-10-28T11:41:57Z>
+<payload, до 16 КБ>
+```
+
+- `app`, `pub` и `ts` ставит мост.
+- `purpose` — латиница в нижнем регистре, цифры, `.-_`, до 40 знаков. `activity`, `presence`, `receipt`, `revoke`, `app`, `most` — только для моста.
+- Без вопроса подписывается только `login` и только у приложения с проверенным издателем. Остальное — после согласия хозяина ПК, которое действует до перезапуска моста.
+
+**Вызовы** (право `identity`):
+- `GET {MOST_API}/identity` → `{key, fingerprint, name, publisher, verified, rotated: [{signed, sig, key}]}`. `rotated` — переходы со старых ключей: строка `purpose=revoke`, payload `{"v":1,"old":…,"new":…}`, подписанная старым ключом.
+- `POST {MOST_API}/identity/sign {purpose, payload}` → `{key, sig, signed}`.
+- В веб-SDK: `most.identity.get()`, `most.identity.sign(purpose, payload)`.
+
+**Ключ в сеансе.** Если у приложения есть право на ключ, у участника есть `key` в `members`, в событии `member` и в билете (`/app/ticket`). Ключ передаётся со слов моста участника.
+
+**Подпись издателя.** Файл `most-sig.json` в корне папки или пакета: `{"v":1,"pub","tree","sig"}`.
+- `tree` = hex SHA-256 от строк `путь\tsha256(файла)\n`, отсортированных по пути. Входят все файлы, кроме `most-sig.json`, `.git`, `node_modules` и отладочных папок Unity.
+- `sig` — Ed25519 над `most-app-sig/v1\ntree=<tree>`.
+- Если в app.json указан `publisher`, он должен совпадать с `pub`.
+- Неверная подпись у пакета — отказ. У папки — «без подписи» с причиной в `sigNote`.
+- Издатель входит в отпечаток разрешения.
+- Командная строка: `bridge app keygen [файл]`, `bridge app sign <папка> --key <файл>`, `bridge app pack <папка> --key <файл>`, `bridge app verify <папка|пакет>`.
+
+**`network`** в app.json — до 8 точных адресов `https://…` или `wss://…`, без `*`, пути и запроса. Мост добавляет их в `connect-src` политики веб-интерфейса, показывает в окне разрешения и учитывает в отпечатке.
+
+**Локальный API:**
+- `GET identity` → `{key, fingerprint, protected, previous}`;
+- `POST identity/export {password}` → файл копии `{v, kind:"most-key", kdf:"argon2id", salt, nonce, ct, fingerprint}`;
+- `POST identity/import {file, password}`;
+- `POST identity/rotate`;
+- `GET apps/identity?id=`, `POST apps/identity/sign {id, purpose, payload}`;
+- `POST apps/identity/answer {ask, ok, remember}`.
+
+Ожидающие подписи вопросы приходят событием `{media:"apps", type:"sign"}` и лежат в `signAsks` ответа `GET apps`. С телефона эти вызовы недоступны; пока ПК управляют по сети — тоже.
+
+### Передача приложений соседям (3.6)
+
+Отправить приложение — `POST apps/share {id, peers: [...]}` → `{results: {сосед: текст}, size}`. Папка упаковывается в `.most-app` (кэш — `bridge-data/apps/out`), пакет уходит как есть. Соседу приходит предложение, которое живёт сутки.
+
+Предложения — в `GET apps` → `offers: [{offer, id, name, version, description, author, size, sha256, perms, kinds: {ui, native, service, actions, net}, from, at, state: new|download|done|error, error, have?: {version, folder}}]`. О новых предложениях и смене их состояния панель узнаёт событием `{media: "apps", type: "offer"}`.
+- `POST apps/offer/accept {offer}` — скачать пакет (до 4 ГБ, sha256 и id в app.json проверяются), прежнюю версию убрать в корзину моста и положить пакет в «приложения». Запуск — только после `apps/allow`.
+- `POST apps/offer/decline {offer}` — отклонить предложение.
+- `POST apps/take {peer, id}` — «Взять у хоста»: попросить пакет у соседа и сразу скачать. Сосед отдаёт пакет, только если приложение сейчас идёт в сеансе в общем канале и в его app.json нет `"share": false`.
+
+Между мостами (подпись соседа):
+- `POST /peer/apps/offer`;
+- `POST /peer/apps/request {id}` → описание и offer;
+- `GET /peer/apps/pkg?offer=` — поток с `X-Sha256`. Отдаётся только тому соседу, которому сделано предложение.
 
 ## Сеансы приложений (3.5)
 

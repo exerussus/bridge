@@ -76,6 +76,8 @@ struct Member {
     conn: u64,
     name: String,
     ticket: String,
+    /// Ключ пользователя для издателя приложения (3.7) — со слов его моста; пусто без права identity.
+    key: String,
 }
 
 struct Hosted {
@@ -168,6 +170,15 @@ pub fn set_channel(node: &Arc<Node>, room: &str, title: &str, members: Vec<Strin
 
 pub fn channel(node: &Node) -> Chan {
     node.net.chan.lock().clone()
+}
+
+/// Приложение `app` сейчас в сеансе в моём канале, а `peer` — в этом же канале: ему можно отдать пакет по просьбе («Взять у хоста»).
+pub fn shared_in_channel(node: &Node, app: &str, peer: &str) -> bool {
+    let ch = channel(node);
+    if ch.room.is_empty() || !ch.members.iter().any(|m| bridge_core::eq_ic(m, peer)) {
+        return false;
+    }
+    node.net.hosted.lock().values().any(|h| h.app == app && h.room == ch.room) || node.net.conns.lock().values().any(|c| c.app == app && c.sess.as_ref().map(|s| s.room == ch.room).unwrap_or(false))
 }
 
 fn leave_with_channel(node: &Node, app: &str) -> bool {
@@ -315,6 +326,7 @@ fn list_for(node: &Node, conn: u64) -> Vec<Value> {
 fn summary(node: &Node, sid: &str, h: &Hosted, proto: &Value) -> Value {
     json!({
         "sid": sid, "app": h.app, "proto": h.proto, "room": h.room, "title": h.title, "host": node.node_name(),
+        "name": crate::apps::get(node, &h.app).map(|a| a.name).unwrap_or_default(), "version": crate::apps::get(node, &h.app).map(|a| a.version).unwrap_or_default(),
         "count": h.members.len(), "max": h.max, "transport": h.transport, "created": h.created, "meta": h.meta,
         "members": h.members.values().map(|m| m.name.clone()).collect::<Vec<_>>(),
         "joinable": h.proto == *proto && (h.members.len() as u16) < h.max,
@@ -339,8 +351,9 @@ fn create(node: &Arc<Node>, conn: u64, v: &Value) -> Result<Value, String> {
     let ticket = hex::encode(rand::random::<[u8; 16]>());
     let me = node.node_name();
     let mut members = BTreeMap::new();
-    members.insert(HOST, Member { cid: HOST, node: me.clone(), conn, name: label.clone(), ticket: ticket.clone() });
-    node.net.tickets.lock().insert(ticket.clone(), json!({ "sid": sid, "app": app, "cid": HOST, "node": me, "name": label }));
+    let key = crate::identity::app_key(node, &app);
+    members.insert(HOST, Member { cid: HOST, node: me.clone(), conn, name: label.clone(), ticket: ticket.clone(), key: key.clone() });
+    node.net.tickets.lock().insert(ticket.clone(), json!({ "sid": sid, "app": app, "cid": HOST, "node": me, "name": label, "key": key }));
     let h = Hosted {
         app: app.clone(),
         proto: net["proto"].clone(),
@@ -371,7 +384,7 @@ fn snapshot(sid: &str, h: &Hosted, you: u16, host: &str) -> Value {
     let ticket = h.members.get(&you).map(|m| m.ticket.clone()).unwrap_or_default();
     json!({
         "sid": sid, "app": h.app, "room": h.room, "title": h.title, "host": host, "you": you, "isHost": you == HOST,
-        "members": h.members.values().map(|m| json!({ "cid": m.cid, "node": m.node, "name": m.name })).collect::<Vec<_>>(),
+        "members": h.members.values().map(|m| json!({ "cid": m.cid, "node": m.node, "name": m.name, "key": m.key })).collect::<Vec<_>>(),
         "state": h.state, "rev": h.rev, "connect": h.connect, "transport": h.transport, "ticket": ticket, "max": h.max,
         "hostNow": now_ms(), "created": h.created, "meta": h.meta,
     })
@@ -388,7 +401,7 @@ async fn join(node: &Arc<Node>, conn: u64, sid: &str) -> Result<Value, String> {
     let me = node.node_name();
     // свой сеанс (второй экземпляр на этом же ПК)
     if node.net.hosted.lock().contains_key(sid) {
-        let snap = host_join(node, sid, &me, conn, &label, &app, &proto, &room)?;
+        let snap = host_join(node, sid, &me, conn, &label, &app, &proto, &room, &crate::identity::app_key(node, &app))?;
         if let Some(c) = node.net.conns.lock().get_mut(&conn) {
             c.sess = Some(Joined { sid: sid.into(), cid: snap["you"].as_u64().unwrap_or(0) as u16, host: me.clone(), room: room.clone() });
         }
@@ -397,7 +410,7 @@ async fn join(node: &Arc<Node>, conn: u64, sid: &str) -> Result<Value, String> {
     let host = node.net.remote.lock().get(sid).and_then(|(s, _)| s["host"].as_str().map(String::from)).ok_or("сеанс закончился или недоступен")?;
     let (tx, rx) = oneshot::channel();
     node.net.joins.lock().insert(conn, tx);
-    link_text(node, &host, json!({ "t": "join", "sid": sid, "conn": conn, "name": label, "app": app, "proto": proto, "room": room }));
+    link_text(node, &host, json!({ "t": "join", "sid": sid, "conn": conn, "name": label, "app": app, "proto": proto, "room": room, "key": crate::identity::app_key(node, &app) }));
     let r = match tokio::time::timeout(Duration::from_secs(8), rx).await {
         Ok(Ok(r)) => r,
         _ => {
@@ -413,7 +426,7 @@ async fn join(node: &Arc<Node>, conn: u64, sid: &str) -> Result<Value, String> {
 
 /// У хоста: впустить участника (с этого ПК или с соседа).
 #[allow(clippy::too_many_arguments)]
-fn host_join(node: &Arc<Node>, sid: &str, from_node: &str, conn: u64, name: &str, app: &str, proto: &Value, room: &str) -> Result<Value, String> {
+fn host_join(node: &Arc<Node>, sid: &str, from_node: &str, conn: u64, name: &str, app: &str, proto: &Value, room: &str, key: &str) -> Result<Value, String> {
     let me = node.node_name();
     let (snap, new_member) = {
         let mut g = node.net.hosted.lock();
@@ -436,12 +449,13 @@ fn host_join(node: &Arc<Node>, sid: &str, from_node: &str, conn: u64, name: &str
         }
         h.next_cid = cid.wrapping_add(1).max(1);
         let ticket = hex::encode(rand::random::<[u8; 16]>());
-        let m = Member { cid, node: from_node.to_string(), conn, name: name.to_string(), ticket: ticket.clone() };
-        node.net.tickets.lock().insert(ticket, json!({ "sid": sid, "app": app, "cid": cid, "node": from_node, "name": name }));
+        let key: String = key.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').take(43).collect();
+        let m = Member { cid, node: from_node.to_string(), conn, name: name.to_string(), ticket: ticket.clone(), key };
+        node.net.tickets.lock().insert(ticket, json!({ "sid": sid, "app": app, "cid": cid, "node": from_node, "name": name, "key": m.key }));
         h.members.insert(cid, m.clone());
         (snapshot(sid, h, cid, &me), m)
     };
-    broadcast(node, sid, json!({ "ev": "member", "op": "join", "m": { "cid": new_member.cid, "node": new_member.node, "name": new_member.name } }), Some(new_member.cid));
+    broadcast(node, sid, json!({ "ev": "member", "op": "join", "m": { "cid": new_member.cid, "node": new_member.node, "name": new_member.name, "key": new_member.key } }), Some(new_member.cid));
     announce_all(node);
     Ok(snap)
 }
@@ -800,7 +814,7 @@ fn peer_text(node: &Arc<Node>, peer: &str, v: Value) {
         }
         "join" => {
             let conn = v["conn"].as_u64().unwrap_or(0);
-            let r = host_join(node, &sid, peer, conn, v["name"].as_str().unwrap_or(peer), v["app"].as_str().unwrap_or(""), &v["proto"], v["room"].as_str().unwrap_or(""));
+            let r = host_join(node, &sid, peer, conn, v["name"].as_str().unwrap_or(peer), v["app"].as_str().unwrap_or(""), &v["proto"], v["room"].as_str().unwrap_or(""), v["key"].as_str().unwrap_or(""));
             link_text(node, peer, match r {
                 Ok(snap) => json!({ "t": "joined", "conn": conn, "snap": snap }),
                 Err(e) => json!({ "t": "denied", "conn": conn, "error": e }),

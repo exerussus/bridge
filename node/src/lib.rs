@@ -1,6 +1,8 @@
 //! Узел моста: HTTP (соседи и локальный API), обмен с соседями, отправка файлов, общие папки, пространства, команды.
 
 pub mod activity;
+pub mod app_share;
+pub mod identity;
 pub mod agent;
 pub mod apps;
 pub mod assistant;

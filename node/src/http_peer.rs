@@ -397,6 +397,9 @@ pub fn router(node: Arc<Node>) -> Router {
         .route(&format!("{}/peer/board/push", p), post(peer_board_push))
         .route(&format!("{}/peer/board/image", p), get(peer_board_image_get).post(peer_board_image_put))
         .route(&format!("{}/peer/update/file", p), get(peer_update_file))
+        .route(&format!("{}/peer/apps/offer", p), post(peer_apps_offer))
+        .route(&format!("{}/peer/apps/request", p), post(peer_apps_request))
+        .route(&format!("{}/peer/apps/pkg", p), get(peer_apps_pkg))
         .route(&format!("{}/peer/assistant/reply", p), post(assistant_reply))
         .merge(crate::http_local::routes())
         .merge(crate::http_apps::routes())
@@ -952,6 +955,45 @@ async fn peer_update_offer(State(node): St, req: Request) -> Response {
     match crate::update::on_offer(&node, &pc.name, &v) {
         Ok(()) => ok_json(&serde_json::json!({ "ok": true })),
         Err((c, e)) => err(c, e),
+    }
+}
+
+/// Сосед предлагает приложение (3.6).
+async fn peer_apps_offer(State(node): St, req: Request) -> Response {
+    let pc = ctx(&req);
+    let v = match body_json(&pc) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    match crate::app_share::on_offer(&node, &pc.name, &v) {
+        Ok(()) => ok_json(&serde_json::json!({ "ok": true })),
+        Err((c, e)) => err(c, e),
+    }
+}
+
+/// Сосед просит приложение, которое идёт в сеансе в нашем общем канале.
+async fn peer_apps_request(State(node): St, req: Request) -> Response {
+    let pc = ctx(&req);
+    let v = match body_json(&pc) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    match crate::app_share::on_request(&node, &pc.name, v["id"].as_str().unwrap_or("")).await {
+        Ok(v) => ok_json(&v),
+        Err((c, e)) => err(c, e),
+    }
+}
+
+/// Пакет приложения — только тому, кому мы его предложили.
+async fn peer_apps_pkg(State(node): St, Query(m): Query<HashMap<String, String>>, req: Request) -> Response {
+    let pc = ctx(&req);
+    let offer = m.get("offer").cloned().unwrap_or_default();
+    match crate::app_share::served(&node, &offer, &pc.name) {
+        Some((path, sha)) => {
+            let label = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            send_file(&node, &pc.name, "приложение", &label, path, sha).await
+        }
+        None => err(404, "предложение устарело — попросите отправить заново"),
     }
 }
 

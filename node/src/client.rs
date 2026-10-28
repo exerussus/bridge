@@ -328,6 +328,11 @@ impl PeerClient {
         Ok(sha)
     }
 
+    /// Пакет приложения, которое сосед нам предложил (3.6): потоком в файл, с проверкой sha256.
+    pub async fn app_package(&self, offer: &str, dest: &Path, max: i64, label: &str) -> Result<String, PeerError> {
+        self.download_to(&format!("{}/peer/apps/pkg?offer={}", API_PREFIX, esc(offer)), dest, max, "приложение", label).await
+    }
+
     pub async fn download(&self, share: &str, p: &str, dest: &Path, max: i64) -> Result<String, PeerError> {
         self.download_to(&format!("{}/file?path={}", Self::p(share), esc(p)), dest, max, "пространство", p).await
     }
