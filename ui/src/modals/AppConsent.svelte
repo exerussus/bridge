@@ -40,7 +40,7 @@
   <div class="row" style="gap:14px;align-items:center">
     <span class="appic big" style="--h:{hue(a.id)}">{#if a.icon}<img src={'/apps/' + encodeURIComponent(a.id) + '/icon'} alt="" />{:else}{a.name.slice(0, 2)}{/if}</span>
     <div><div style="font-size:20px;font-weight:600">{a.name} <span class="muted" style="font-size:14px;font-weight:400">{a.version}</span></div>
-      <div class="small muted">{a.state === 'changed' ? 'Приложение изменилось' + (a.changeWhy ? ' — ' + a.changeWhy : '') + ', разрешите заново' : 'Новое приложение в папке «приложения»'}{a.author ? ' · ' + a.author : ''} · {a.packaged ? 'пакет .most-app' : 'папка'}</div></div>
+      <div class="small muted">{a.state === 'changed' ? 'Приложение изменилось' + (a.changeWhy ? ' — ' + a.changeWhy : '') + ', разрешите заново' : 'Новое приложение в папке «apps»'}{a.author ? ' · ' + a.author : ''} · {a.packaged ? 'пакет .most-app' : 'папка'}</div></div>
   </div>
   {#if a.description}<p class="small" style="margin:10px 0 0">{a.description}</p>{/if}
   <div class="small" style="margin-top:10px">Издатель: {#if a.publisher}<b class="mono">{a.publisherFp}</b> <span class="muted">— подпись проверена</span>{:else}<span class="muted">без подписи{a.sigNote ? ' (' + a.sigNote + ')' : ''}</span>{/if}</div>

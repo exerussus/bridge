@@ -18,7 +18,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-pub const MY_EDITS_DIR: &str = "_мои-правки";
+pub const MY_EDITS_DIR: &str = "_my-edits";
+/// Прежнее имя (до 3.13): тоже не уходит хозяину, если папку не удалось переименовать.
+pub const MY_EDITS_LEGACY: &str = "_мои-правки";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -907,6 +909,7 @@ impl Folders {
             let s = sc.entry(m.key.to_lowercase()).or_insert_with(|| {
                 let mut t = TreeScanner::new(root.clone()).with_settle(node.settle_secs);
                 t.skip_top.push(MY_EDITS_DIR.into());
+                t.skip_top.push(MY_EDITS_LEGACY.into());
                 t
             });
             if !force.is_empty() {
@@ -995,6 +998,7 @@ impl Folders {
             let s = sc.entry(m.key.to_lowercase()).or_insert_with(|| {
                 let mut t = TreeScanner::new(root.clone()).with_settle(node.settle_secs);
                 t.skip_top.push(MY_EDITS_DIR.into());
+                t.skip_top.push(MY_EDITS_LEGACY.into());
                 t
             });
             if !m.force.is_empty() {

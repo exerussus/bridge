@@ -84,7 +84,7 @@ fn write_inner(node: &Arc<Node>, rt: &Arc<ShareRt>) -> std::io::Result<()> {
         (views, all, rb.store.rejected().to_vec())
     };
     for (view, hist) in &changed {
-        let tdir = dir.join("records").join(safe_name(if view.type_.is_empty() { "_без-типа" } else { &view.type_ }));
+        let tdir = dir.join("records").join(safe_name(if view.type_.is_empty() { "_untyped" } else { &view.type_ }));
         write_atomic(&tdir.join(format!("{}.json", view.id)), &to_json(view))?;
         write_atomic(&tdir.join(format!("{}.history.json", view.id)), &to_json(hist))?;
     }

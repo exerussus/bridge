@@ -151,7 +151,7 @@
             {#each Object.entries(ui.ov.groups || {}) as [g, v]}<label class="chip"><input type="checkbox" value={'@' + g} bind:group={cfg.allowFrom} /> 👥 {(v as any).title || g}</label>{/each}
             {#each AG.peers as p (p.name)}<label class="chip"><input type="checkbox" value={p.name} bind:group={cfg.allowFrom} /> {p.title || p.name}</label>{/each}
           </div></div>
-          <label class="f">Рабочая папка Claude<input bind:value={cfg.workDir} placeholder="пусто — папка «агент» рядом с мостом" /></label>
+          <label class="f">Рабочая папка Claude<input bind:value={cfg.workDir} placeholder="пусто — папка «agent» рядом с мостом" /></label>
           <div class:hide={cfg.mode !== 'auto'}>
             <label class="f">Claude Code (claude.exe)<input bind:value={cfg.claude} placeholder="пусто — найти самому" /></label>
             <div class="small" style="margin:-4px 0 10px">{#if AG.claude}<span style="color:var(--ok)">найден: {AG.claude}</span>{:else}<span style="color:var(--warn)">Claude Code не найден. Установите: PowerShell → <code>irm https://claude.ai/install.ps1 | iex</code>, затем один раз запустите <code>claude</code> и войдите тем же аккаунтом.</span>{/if}</div>
@@ -175,12 +175,12 @@
             {#if AG.exchange}<span class="small">«{AG.exchange.id}»: <span class="mono">{AG.exchange.path}</span> — доступ: {Object.keys(AG.exchange.access).map(titleOf).join(', ') || 'ни у кого'}</span>{:else}<span class="small muted">не настроена</span>{/if}
             {#each AG.peers.filter((p: any) => !AG.exchange || !AG.exchange.access[p.name]) as p (p.name)}<button class="b sm" onclick={() => exchange(p.name)}>＋ обмен с {p.title || p.name}</button>{/each}
           </div>
-          <div class="small" style="margin-top:14px"><b>Агент без сети</b> — Claude в виртуальной машине (Cowork и т. п.) не достаёт до моста по сети. Файловый канал даёт ему те же инструменты через папку «канал-агента» рядом с мостом; управлять ПК он так же не может.</div>
+          <div class="small" style="margin-top:14px"><b>Агент без сети</b> — Claude в виртуальной машине (Cowork и т. п.) не достаёт до моста по сети. Файловый канал даёт ему те же инструменты через папку «agent-channel» рядом с мостом; управлять ПК он так же не может.</div>
           <div class="row" style="margin-top:6px;gap:10px;align-items:center;flex-wrap:nowrap">
             <label class="chip" style="flex:none"><input type="checkbox" checked={!!AG.fileChannel?.on} onchange={(e) => fileChannel((e.currentTarget as HTMLInputElement).checked)} /> канал для агента без сети</label>
             {#each [fcState(AG.fileChannel)] as [t, c]}<span class="small fcline" style={c === 'ok' ? 'color:var(--ok)' : c === 'bad' ? 'color:var(--bad)' : ''} class:muted={c === 'muted'} title={t}>{t}</span>{/each}
           </div>
-          <div class="small muted" style="margin-top:4px">Агенту: подключить папку моста и вызывать <code>./efc --channel канал-агента call bridge_peers</code> (клиент <code>efc</code> лежит в папке канала).</div>
+          <div class="small muted" style="margin-top:4px">Агенту: подключить папку моста и вызывать <code>./efc --channel agent-channel call bridge_peers</code> (клиент <code>efc</code> лежит в папке канала).</div>
         </div>
       </div>
     {/if}

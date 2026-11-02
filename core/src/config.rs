@@ -85,7 +85,7 @@ pub struct MobileConfig {
 
 impl Default for MobileConfig {
     fn default() -> Self {
-        MobileConfig { enabled: true, https: "off".into(), https_port: 0, outbox: "на телефон".into() }
+        MobileConfig { enabled: true, https: "off".into(), https_port: 0, outbox: "to-phone".into() }
     }
 }
 
@@ -335,7 +335,7 @@ impl Default for RunnerConfig {
             allow_from: Vec::new(),
             confirm: true,
             timeout_sec: 600,
-            output_dir: "_команды".into(),
+            output_dir: "_commands".into(),
             hint: String::new(),
             work_dir: None,
         }
@@ -359,7 +359,7 @@ pub struct MailboxConfig {
 
 impl Default for MailboxConfig {
     fn default() -> Self {
-        MailboxConfig { enabled: true, outgoing: "отправка".into(), incoming: "приём".into(), accept_from: vec!["*".into()] }
+        MailboxConfig { enabled: true, outgoing: "outbox".into(), incoming: "inbox".into(), accept_from: vec!["*".into()] }
     }
 }
 
@@ -392,7 +392,7 @@ pub struct MountsConfig {
 
 impl Default for MountsConfig {
     fn default() -> Self {
-        MountsConfig { enabled: true, root: "общие".into(), trash_minutes: 10, ignore: IndexMap::new() }
+        MountsConfig { enabled: true, root: "shared".into(), trash_minutes: 10, ignore: IndexMap::new() }
     }
 }
 

@@ -5,7 +5,7 @@
 //!   действия, итог — `done/<id>.json`. Пакеты, шаги с подстановкой, отмена, пульс, корзина — по стандарту
 //!   (efc-core). Старый `outbox/` работает как раньше, но устарел. Снимки (`status.json`, `index.json`,
 //!   `records/`, `rejected.json`) объявлены в паспорте как `state`, `inbox/` — по стандарту.
-//! - **Канал агента** — папка «канал-агента» рядом с мостом: команды = инструменты `bridge mcp` (те же
+//! - **Канал агента** — папка «agent-channel» рядом с мостом: команды = инструменты `bridge mcp` (те же
 //!   правила: управлять ПК нельзя). Выключен по умолчанию, включается в панели («Агенты»).
 //!
 //! Указатель `.efc-channels.json` — в папке моста: `efc list` из неё находит все каналы.
@@ -23,8 +23,8 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 /// Папка канала агента рядом с мостом.
-pub const AGENT_DIR: &str = "канал-агента";
-const HOW_TO_START: &str = "Запустите Мост на этом ПК (Мост.exe или bridge run)";
+pub const AGENT_DIR: &str = "agent-channel";
+const HOW_TO_START: &str = "Запустите Мост на этом ПК (Most.exe или bridge run)";
 const RETRY: Duration = Duration::from_secs(60);
 
 /// Клиент efc для Linux (статический) — кладётся в каждый канал, агенту в VM ничего ставить не нужно.
@@ -156,8 +156,14 @@ pub fn sync(node: &Arc<Node>) {
     }
 }
 
-fn start(node: &Arc<Node>, cfg: ServerConfig, handler: Arc<dyn Handler>, what: &str, root: PathBuf) -> Slot {
+fn start(node: &Arc<Node>, mut cfg: ServerConfig, handler: Arc<dyn Handler>, what: &str, root: PathBuf) -> Slot {
     let retry_at = Instant::now() + RETRY;
+    // папку перенесли (переименование 3.13, другая папка пространства) — паспорт этого же моста на этом ПК
+    // со старым путём: канал наш, забираем; паспорт с другого ПК — нет
+    let mine = format!("bridge@{}:", efc_core::server::hostname());
+    if efc_core::fsx::read_json::<efc_core::model::Channel>(&root.join("channel.json")).map(|c| c.instance.starts_with(&mine)).unwrap_or(false) {
+        cfg.take_over = true;
+    }
     match Server::start(cfg, handler) {
         Ok(s) => {
             node.info(&format!("Файловый канал efc/1: {} — {}", what, root.display()));
@@ -199,7 +205,7 @@ fn base(node: &Node, root: &Path, name: &str, title: &str) -> ServerConfig {
 }
 
 fn space_config(node: &Node, share: &str, root: &Path) -> ServerConfig {
-    let mut c = base(node, root, &format!("пространство-{}", share), &format!("Мост — пространство «{}»", share));
+    let mut c = base(node, root, &format!("space-{}", share), &format!("Мост — пространство «{}»", share));
     c.roots = BTreeMap::from([("space".to_string(), "..".to_string())]);
     c.state = BTreeMap::from([
         ("status".to_string(), "status.json".to_string()),
@@ -213,7 +219,7 @@ fn space_config(node: &Node, share: &str, root: &Path) -> ServerConfig {
 }
 
 fn agent_config(node: &Node, root: &Path) -> ServerConfig {
-    let mut c = base(node, root, "мост-агент", "Мост — канал агента (инструменты bridge mcp)");
+    let mut c = base(node, root, "bridge-agent", "Мост — канал агента (инструменты bridge mcp)");
     c.how_to_start = "Запустите Мост на этом ПК и включите в панели: «Агенты» → «Канал для агента без сети»".into();
     c.roots = BTreeMap::from([("bridge".to_string(), "..".to_string())]);
     c.reasons = vec!["tool-failed".into()];

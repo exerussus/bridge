@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 /// Папка с приложениями (в папке моста).
-pub const FOLDER: &str = "приложения";
+pub const FOLDER: &str = "apps";
 /// Пакет приложения — zip с app.json в корне.
 pub const EXT: &str = "most-app";
 const MANIFEST: &str = "app.json";
@@ -887,7 +887,7 @@ pub fn clear_data(node: &Arc<Node>, id: &str) -> Result<(), String> {
     stop_all(node, id, "данные очищаются");
     let d = data_dir(node, id);
     if d.exists() {
-        let to = node.folders.trash_dir().join("данные приложений").join(format!("{}--{}", chrono::Local::now().format("%Y%m%d-%H%M%S"), id));
+        let to = node.folders.trash_dir().join("app-data").join(format!("{}--{}", chrono::Local::now().format("%Y%m%d-%H%M%S"), id));
         if let Some(p) = to.parent() {
             std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
         }
@@ -1007,7 +1007,7 @@ pub fn remove(node: &Arc<Node>, id: &str) -> Result<String, String> {
     let a = get(node, id).ok_or("нет такого приложения")?;
     stop_all(node, id, "приложение убрано");
     let name = a.source.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let to = node.folders.trash_dir().join("приложения").join(format!("{}--{}", chrono::Local::now().format("%Y%m%d-%H%M%S"), name));
+    let to = node.folders.trash_dir().join("apps").join(format!("{}--{}", chrono::Local::now().format("%Y%m%d-%H%M%S"), name));
     if let Some(d) = to.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }
@@ -1031,7 +1031,7 @@ pub fn retire(node: &Arc<Node>, id: &str) -> Result<(), String> {
     }
     stop_all(node, id, "приложение обновляется");
     let name = a.source.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let to = node.folders.trash_dir().join("приложения").join(format!("{}--{}", chrono::Local::now().format("%Y%m%d-%H%M%S"), name));
+    let to = node.folders.trash_dir().join("apps").join(format!("{}--{}", chrono::Local::now().format("%Y%m%d-%H%M%S"), name));
     if let Some(d) = to.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }

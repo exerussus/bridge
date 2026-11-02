@@ -1184,7 +1184,7 @@ pub fn activity_event(node: &Node, e: &Value) {
 
 /// Редактор (Unity и т. п.) просит подключиться как приложение `app`: панель спрашивает хозяина.
 pub fn dev_request(node: &Node, app: &str, who: &str) -> Result<String, String> {
-    let a = crate::apps::get(node, app).ok_or(format!("приложения «{}» нет в папке «приложения» этого ПК", app))?;
+    let a = crate::apps::get(node, app).ok_or(format!("приложения «{}» нет в папке «apps» этого ПК", app))?;
     if !crate::apps::consent_ok(node, &a) {
         return Err(format!("«{}» ещё не разрешено на этом ПК — разрешите его в панели", a.name));
     }

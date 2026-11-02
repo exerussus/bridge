@@ -64,7 +64,7 @@
   <Drop onfiles={queue} style="margin-top:10px">
     <div style="font-size:22px"><Gi n="up" /></div>
     <div><b>Перетащите файлы или папки сюда</b> — или нажмите, чтобы выбрать</div>
-    <div class="small">Сосед заберёт их в «приём/{ui.ov.node.node}/…», подтвердит — и здесь они исчезнут из очереди.</div>
+    <div class="small">Сосед заберёт их в «inbox/{ui.ov.node.node}/…», подтвердит — и здесь они исчезнут из очереди.</div>
   </Drop>
   <div class="row small" style="margin-top:8px"><button class="b sm" onclick={pickDir}><Gi n="folder" /> Выбрать папку целиком</button><span class="muted">Большие файлы идут частями по сети без ограничений браузера; до 1 ГБ на файл (настройка maxFileMb).</span></div>
   <div style="margin-top:10px">
@@ -82,7 +82,7 @@
       {#if out.length}
         <table><tbody>{#each out as { peer, f } (peer + f.path)}
           <tr><td>{peerTitle(peer)}</td><td class="mono">{f.path}</td><td class="small muted">{size(f.size)}</td>
-            <td><button class="b sm danger" title="убрать из очереди (в «_отменено»)" onclick={() => cancel(peer, f.path)}>✖</button></td></tr>
+            <td><button class="b sm danger" title="убрать из очереди (в «_cancelled»)" onclick={() => cancel(peer, f.path)}>✖</button></td></tr>
         {/each}</tbody></table>
       {:else}<div class="empty">Очередь пуста</div>{/if}
     </div>

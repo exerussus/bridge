@@ -38,7 +38,7 @@ requests.post(B + "ui", json={"action": "join", "channel": "Семья"}, header
 | `assistant-in` | (хозяин) пришло сообщение ассистенту | `peer`, `kind`, `id`, `seq` |
 | `assistant-msg` | ответ или уведомление ассистента пришло на этот ПК | `id`, `kind`, `notice`, `alarm`, `text` (начало), `unread` |
 | `assistant-state` | ассистент появился / пропал | `online` |
-| `device-outbox` | файл положен «на телефон» | `device`, `path` |
+| `device-outbox` | файл положен в «to-phone» | `device`, `path` |
 | `update-offer` | сосед предлагает обновить мост | `from`, `version` |
 | `update-state` | ход обновления | `status` (offer, download, install, restart, done, error), `error` |
 | `update-done` | мост запустился после обновления | `version`, `from` |
@@ -98,7 +98,7 @@ requests.post(B + "ui", json={"action": "join", "channel": "Семья"}, header
 - `POST devices {id, name?, rights?}`, `POST devices/remove?id` — переименовать, сменить доступ, отключить.
 - **Отправить файл на телефон**: `POST devices/send {device?, path, name?}` (файл с диска; `device` можно не указывать, если телефон один). Байтами: `POST devices/upload?device&path`.
 - `GET mobile` — телефоны, адреса для подключения, состояние Tailscale; `POST mobile/https {on}` — HTTPS через Tailscale.
-- Файлы с телефона приходят как от соседа: событие `mailbox-received`, `peer` — имя телефона, файл — в «приём/<имя телефона>».
+- Файлы с телефона приходят как от соседа: событие `mailbox-received`, `peer` — имя телефона, файл — в «inbox/<имя телефона>».
 
 ## Ассистент (контракт v1)
 
@@ -115,7 +115,7 @@ requests.post(B + "ui", json={"action": "join", "channel": "Семья"}, header
 
 Очередь хозяина — `bridge-data/assistant/inbound.jsonl` (7 дней, до 1000 сообщений), переживает перезапуск; повтор с тем же `id` — не дубль. Кто может писать ассистенту: `assistant.allowFrom` в bridge.json (по умолчанию `["*"]` — все включённые соседи).
 
-Для панели (на любом ПК): `GET assistant/chat[?after&timeout]` — история, «печатает…», на связи ли ассистент; `POST assistant/send {kind, text, files?, voice?, action?, replyTo?}`; `POST assistant/read`. Файлы из ответов — в «приём/ассистент» (`GET mailbox/incoming/file?path=ассистент/<имя>`). Пульт: `POST ui {action: "tab", tab: "assistant"}`.
+Для панели (на любом ПК): `GET assistant/chat[?after&timeout]` — история, «печатает…», на связи ли ассистент; `POST assistant/send {kind, text, files?, voice?, action?, replyTo?}`; `POST assistant/read`. Файлы из ответов — в «inbox/assistant» (`GET mailbox/incoming/file?path=ассистент/<имя>`). Пульт: `POST ui {action: "tab", tab: "assistant"}`.
 
 Исполнители соседа, которые этому ПК можно запускать, — `peers[].runners` в `GET overview`: `[{name, title, share, params, hint, confirm}]`. `hint` — новое поле исполнителя в bridge.json: подсказка людям и ассистенту, какие значения допустимы.
 
@@ -155,7 +155,7 @@ requests.post(B + "ui", json={"action": "join", "channel": "Семья"}, header
 
 ## Пространства
 
-- `POST shares {id, title, folder, peers, accept: [{pattern, from}], recordsAccept: [{from, types, ops}]}` — создать или изменить пространство (папка по умолчанию — «Пространства/<id>»; сменили папку — пространство откроется заново, файлы не переносятся). `peers` — соседи или `@группа`. `accept` — что принимать: первое подходящее правило; пусто — только раздавать. `recordsAccept` пусто — записи от всех участников.
+- `POST shares {id, title, folder, peers, accept: [{pattern, from}], recordsAccept: [{from, types, ops}]}` — создать или изменить пространство (папка по умолчанию — «spaces/<id>»; сменили папку — пространство откроется заново, файлы не переносятся). `peers` — соседи или `@группа`. `accept` — что принимать: первое подходящее правило; пусто — только раздавать. `recordsAccept` пусто — записи от всех участников.
 - `POST shares/remove?id` — убрать пространство с этого ПК (папка остаётся).
 - `GET shares/offers` — `{offers: [{peer, id}]}`: пространства, которые соседи открыли этому ПК, а здесь их нет.
 - Записи: `POST actions {action: "create", share, type, fields}` — любой вид (`task`, `decision`, `note`, `status` или свой); `{action: "set", record, fields, expectVersion}` — изменить поля (null — убрать поле).
@@ -226,9 +226,9 @@ requests.post(B + "ui", json={"action": "join", "channel": "Семья"}, header
 
 «Поделиться версией» (окно «Что нового»): соседям со старой версией уходит предложение; обновляются они только после подтверждения у себя.
 
-- `POST update/offer {peers?}` — предложить (без списка — всем на связи) → `{version, results: {сосед: что вышло}}`. Мостам до 2.12 файлы уходят обычной отправкой (в «приём/<вы>/Мост <версия>/») и сообщением в личный чат.
+- `POST update/offer {peers?}` — предложить (без списка — всем на связи) → `{version, results: {сосед: что вышло}}`. Мостам до 2.12 файлы уходят обычной отправкой (в «приём/<вы>/Most <версия>/», имя программы — прежнее «Мост.exe») и сообщением в личный чат.
 - `GET update/state` — `{version, status, error, offer: {from, version, files, notes}, restartable}`.
-- `POST update/accept` — скачать у предложившего Мост.exe и bridge.exe, сверить sha256, заменить (старые — в `*.old`, их уберёт следующий запуск) и перезапуститься; `POST update/decline`.
+- `POST update/accept` — скачать у предложившего Most.exe и bridge.exe (мостам до 3.13 программа уходит под прежним именем «Мост.exe»), сверить sha256, заменить (старые — в `*.old`, их уберёт следующий запуск) и перезапуститься; `POST update/decline`.
 - `POST update/rejoin` — после перезапуска с обновлением: `{rejoin: {room, title, at}}`, если ПК сидел в канале (до 10 минут, отдаётся один раз), иначе `{rejoin: null}`. Панель по нему тихо возвращается в канал (3.10).
 - Соседи: `POST /peer/update/offer {version, files: [{name, size, sha256}], notes}`, `GET /peer/update/file?name` (только файлы программы).
 
@@ -278,7 +278,7 @@ requests.post(B + "ui", json={"action": "join", "channel": "Семья"}, header
   Пример: `./efc --channel <пространство>/_bridge --params '{"record":"<id>","to":"review","note":"готово"}' call transition`.
   `inbox/<id>.json` — с полями efc `v`, `key`, `since`, `suggest` (готовые запросы-переходы) рядом с прежними `why` и
   `record`; `status.json` — с `efc {running, error}`. Старый `outbox/` работает, но устарел.
-- **Канал агента** — папка «канал-агента» рядом с мостом: команды = инструменты `bridge mcp` с теми же аргументами в
+- **Канал агента** — папка «agent-channel» рядом с мостом: команды = инструменты `bridge mcp` с теми же аргументами в
   `params` (`bridge_peers`, `agent_ask`, `agent_wait`, `bridge_api`, …), те же правила (управлять ПК нельзя). Ожидание
   (`wait_seconds`) урезается до срока запроса; долгое — `efc --no-wait call …`, затем `efc wait <id>`. Выключен по
   умолчанию: `POST agent/settings {fileChannel: true}` или панель «Агенты» → «канал для агента без сети»; состояние —
@@ -392,7 +392,7 @@ ts=<UTC, вид 2026-10-28T11:41:57Z>
 Отправить приложение — `POST apps/share {id, peers: [...]}` → `{results: {сосед: текст}, size}`. Папка упаковывается в `.most-app` (кэш — `bridge-data/apps/out`), пакет уходит как есть. Соседу приходит предложение, которое живёт сутки.
 
 Предложения — в `GET apps` → `offers: [{offer, id, name, version, description, author, size, sha256, perms, kinds: {ui, native, service, actions, net}, from, at, state: new|download|done|error, error, have?: {version, folder}}]`. О новых предложениях и смене их состояния панель узнаёт событием `{media: "apps", type: "offer"}`.
-- `POST apps/offer/accept {offer}` — скачать пакет (до 4 ГБ, sha256 и id в app.json проверяются), прежнюю версию убрать в корзину моста и положить пакет в «приложения». Запуск — только после `apps/allow`.
+- `POST apps/offer/accept {offer}` — скачать пакет (до 4 ГБ, sha256 и id в app.json проверяются), прежнюю версию убрать в корзину моста и положить пакет в «apps». Запуск — только после `apps/allow`.
 - `POST apps/offer/decline {offer}` — отклонить предложение.
 - `POST apps/take {peer, id}` — «Взять у хоста»: попросить пакет у соседа и сразу скачать. Сосед отдаёт пакет, только если приложение сейчас идёт в сеансе в общем канале и в его app.json нет `"share": false`.
 
@@ -459,7 +459,7 @@ ts=<UTC, вид 2026-10-28T11:41:57Z>
 **Свой сервер** (`transport: "external"`). Хост задаёт `connect`, а каждый участник получает свой `ticket`. Сервер на ПК хоста проверяет билет: `GET /bridge/v1/app/ticket?t=` → `{ok, who: {sid, app, cid, node, name}}` или 404.
 
 **Редактор.** Unity и другие среды подключаются так:
-1. `POST /bridge/v1/app/dev {app, who}` → `{req}`. Приложение должно лежать в «приложения» и быть разрешено. Ответа одновременно ждут не больше трёх запросов.
+1. `POST /bridge/v1/app/dev {app, who}` → `{req}`. Приложение должно лежать в «apps» и быть разрешено. Ответа одновременно ждут не больше трёх запросов.
 2. Панель спрашивает хозяина ПК.
 3. `GET /bridge/v1/app/dev?req=` → `{state: wait|ok|no|gone, token}`.
 
@@ -502,11 +502,11 @@ Unity — пакет `sdk/unity/com.exerussus.most` (см. его README).
 
 - `POST upload/part?id&offset` (тело — часть файла, по порядку) — большие файлы частями; затем обычный вызов (`mailbox/upload`, `fs/upload` и др.) с `?upload=<id>&size=<байт>` и пустым телом. Часть не по порядку — `409`.
 - `GET builds` → `{history, received: [{peer, name, mode, files, bytes, at, target}], jobs, defaultRoot}`.
-- `POST builds/send {peer, path, name, mode: patch|clean}` — упаковать папку (полный путь) и отправить; идёт в фоне (`jobs`). Архив уходит ручной отправкой в `_сборки/<name>/<mode>-<время>.zip`, получатель распаковывает его сам (`clean` — прежняя папка в корзину моста).
+- `POST builds/send {peer, path, name, mode: patch|clean}` — упаковать папку (полный путь) и отправить; идёт в фоне (`jobs`). Архив уходит ручной отправкой в `_builds/<name>/<mode>-<время>.zip` (мостам до 3.13 — в `_сборки/…`, принимаются оба), получатель распаковывает его сам (`clean` — прежняя папка в корзину моста).
 - (3.8) В заготовке — `exe`: что запускать у получателя (путь внутри сборки, без «..»). `POST builds/send {preset, mode?, note?}` — `note` — «что нового» (до 2000 знаков). В архиве `_most-build.json` теперь есть `exe`, `note` и `n` — номер версии этой сборки для этого соседа. `builds/preview` отдаёт `exes` — подсказки, что запускать.
 - (3.8) У получателя: `GET builds` → `received: [{peer, name, n, note, at, mode, files, bytes, target, exe, exeExists, running, lastOk, history: [..новые первыми]}]`. `POST builds/run {peer, name}` — запустить указанную отправителем программу (только с этого ПК; пока ПК управляют по сети и с телефона — нельзя), `POST builds/stop {peer, name}`.
 - (3.3.5) Заготовки: `GET builds/presets` → `{list}`, `POST builds/presets {list: [{id, name, path, peers: [..], mode, ignore: [строки]}]}` (до 50; `id` — латиница, цифры, - и _; `ignore` — шаблоны как в .gitignore, `!шаблон` возвращает исключённое, до 500 строк). `POST builds/preview {path, ignore} | {preset}` → `{files, bytes, ignoredFiles, ignoredBytes, rules: [{rule, files, bytes, example}], biggest}`. `POST builds/send {preset, mode?}` — по заготовке всем её получателям → `{started: [..], errors}`; разовая отправка принимает и `ignore`. В истории — `preset`, `skipped`.
-- `POST builds/target {peer, name, path}` — куда распаковывать сборку от соседа (пусто — `сборки/<name>`).
+- `POST builds/target {peer, name, path}` — куда распаковывать сборку от соседа (пусто — `builds/<name>`).
 - `POST builds/exe {peer, name, exe}` (3.11) — своя программа для запуска присланной сборки: путь внутри папки сборки или полный путь к файлу в ней; пусто — как указал отправитель. В `GET builds` у присланной: `exe` (что запустится), `exeSender`, `exeOwn`. Программа отправителя запоминается: версия без неё её не сбрасывает. В заготовке (`builds/presets`) `exe` тоже можно дать полным путём внутри папки сборки. `POST open?target=build&peer&name` — открыть папку сборки.
 - `GET mounts/plan?peer&id` → `{items: [{path, act: download|update|delete_here|upload|delete_owner|restore|conflict, size, local, remote}], total, down, up, speedDown, speedUp, etaDown, etaUp (с; -1 — неизвестно), localFiles, remoteFiles, transfers, failed}` — что сделает обмен с папкой соседа.
 - `GET mounts/plan?peer&id&force=push|take` (3.11) — что сделает жёсткая сверка (sha всех файлов пересчитываются заново).

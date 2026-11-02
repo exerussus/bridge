@@ -28,6 +28,7 @@ pub mod pack;
 pub mod node;
 pub mod progress;
 pub mod remote;
+pub mod rename;
 pub mod runner;
 pub mod shares;
 pub mod sound;

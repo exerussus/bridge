@@ -301,7 +301,7 @@ pub fn build_args(rt: &ShareRt, rc: &RunnerConfig, s: &RecordState) -> Result<Ve
 }
 
 async fn execute(node: &Arc<Node>, rt: &Arc<ShareRt>, id: &str, rc: &RunnerConfig, args: Vec<String>, cancel: tokio_util::sync::CancellationToken) {
-    let out_dir = path::norm(&rc.output_dir).unwrap_or_else(|| "_команды".into());
+    let out_dir = path::norm(&rc.output_dir).unwrap_or_else(|| "_commands".into());
     let log_rel = format!("{}/{}.log", out_dir, id);
     let Ok(log_full) = path::to_local(&rt.root, &log_rel) else { return };
     if let Some(d) = log_full.parent() {

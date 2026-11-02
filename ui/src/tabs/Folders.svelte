@@ -145,7 +145,7 @@
     planBusy = false;
   }
   async function syncNow() { try { await api('POST', 'sync'); toast('Обмен запущен'); setTimeout(loadPlan, 2500); } catch (e: any) { toast(e.message, 'bad'); } }
-  const ACT: Record<string, [string, string]> = { download: ['скачается', 'ok'], update: ['обновится', 'ok'], delete_here: ['удалится здесь (в корзину)', 'warn'], upload: ['уйдёт хозяину', 'acc'], delete_owner: ['удалится у хозяина', 'warn'], restore: ['вернётся копия хозяина — ваша правка уйдёт в «_мои-правки»', 'warn'], conflict: ['правили оба — копия хозяина главная, ваша останется рядом', 'bad'] };
+  const ACT: Record<string, [string, string]> = { download: ['скачается', 'ok'], update: ['обновится', 'ok'], delete_here: ['удалится здесь (в корзину)', 'warn'], upload: ['уйдёт хозяину', 'acc'], delete_owner: ['удалится у хозяина', 'warn'], restore: ['вернётся копия хозяина — ваша правка уйдёт в «_my-edits»', 'warn'], conflict: ['правили оба — копия хозяина главная, ваша останется рядом', 'bad'] };
   const eta = (s: number) => (s < 0 ? 'время неизвестно — скорость ещё не измерена' : s < 60 ? 'меньше минуты' : s < 3600 ? '≈ ' + Math.ceil(s / 60) + ' мин' : '≈ ' + (s / 3600).toFixed(1) + ' ч');
   async function fsDel(path: string) {
     if (!confirm('Удалить «' + path + '»? Удаление уйдёт всем, кто подключён к папке. Файл можно вернуть из корзины.')) return;
@@ -313,7 +313,7 @@
             <td class="mono"><a href="#dl" onclick={e => { e.preventDefault(); download('fs/file?' + fsQuery({ path: f.path }), f.path.split('/').pop()).catch(er => toast(er.message, 'bad')); }}>{f.path}</a></td>
             <td class="small muted">{size(f.size)}</td><td class="small muted" title={fullTime(f.time)}>{ago(f.time)}</td>
             <td>{#if f.ignored}<span class="chip ig">{f.ignored}</span>{:else}<button class="b sm" title="в игнор" onclick={() => fsIgn(f.path)}><Gi n="block" /></button> {/if}
-              {#if fsWritable && !f.path.startsWith('_мои-правки/')}<button class="b sm danger" title="удалить (в корзину)" onclick={() => fsDel(f.path)}><Gi n="trash" /></button>{/if}</td>
+              {#if fsWritable && !f.path.startsWith('_my-edits/') && !f.path.startsWith('_мои-правки/')}<button class="b sm danger" title="удалить (в корзину)" onclick={() => fsDel(f.path)}><Gi n="trash" /></button>{/if}</td>
           </tr>
         {:else}
           <tr><td colspan="4" class="empty">{fsQ ? 'Ничего не нашлось' : 'Папка пуста' + (fsWritable ? ' — перетащите сюда файлы' : '')}</td></tr>
@@ -330,7 +330,7 @@
     <td class="mono" style="padding-left:{8 + depth * 18}px"><a href="#dl" onclick={e => { e.preventDefault(); download('fs/file?' + fsQuery({ path: f.path }), fname(f.path)).catch(er => toast(er.message, 'bad')); }}>{depth || fsView === 'tree' ? fname(f.path) : f.path}</a></td>
     <td class="small muted">{size(f.size)}</td><td class="small muted" title={fullTime(f.time)}>{ago(f.time)}</td>
     <td>{#if f.ignored}<span class="chip ig">{f.ignored}</span>{:else}<button class="b sm" title="в игнор" onclick={() => fsIgn(f.path)}><Gi n="block" /></button> {/if}
-      {#if fsWritable && !f.path.startsWith('_мои-правки/')}<button class="b sm danger" title="удалить (в корзину)" onclick={() => fsDel(f.path)}><Gi n="trash" /></button>{/if}</td>
+      {#if fsWritable && !f.path.startsWith('_my-edits/') && !f.path.startsWith('_мои-правки/')}<button class="b sm danger" title="удалить (в корзину)" onclick={() => fsDel(f.path)}><Gi n="trash" /></button>{/if}</td>
   </tr>
 {/snippet}
 {#snippet dirRows(d: any, depth: number)}

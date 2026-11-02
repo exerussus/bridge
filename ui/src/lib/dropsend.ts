@@ -1,5 +1,5 @@
 // Быстрая отправка: файлы (и папки), брошенные на плитку участника в канале, уходят ему ручной отправкой
-// (у него — в «приём/<этот ПК>»). Ход видно в плашке передач в углу панели.
+// (у него — в «inbox/<этот ПК>»). Ход видно в плашке передач в углу панели.
 import { upload } from './api';
 import { ui, toast, titleOf } from './state.svelte';
 import { dropFiles, size } from './util';
@@ -19,7 +19,7 @@ export async function sendFiles(peer: string, list: { file: File; path: string }
     catch (e: any) { bad.push(it.path + ': ' + e.message); }
   }
   if (bad.length) toast('Не ушло ' + bad.length + ' из ' + list.length + ': ' + bad.slice(0, 2).join('; '), 'bad');
-  else toast('Отправлено ' + titleOf(peer) + ': ' + (ok === 1 ? list[0].path : ok + ' файлов') + ' — у него в «приём»', 'ok');
+  else toast('Отправлено ' + titleOf(peer) + ': ' + (ok === 1 ? list[0].path : ok + ' файлов') + ' — у него в «inbox»', 'ok');
 }
 
 /** Действие Svelte: use:dropSend={name}. Своя плитка и не соседи — отказ с понятной подсказкой. */

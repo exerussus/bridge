@@ -412,7 +412,7 @@ function refresh(){ if (!ME) return;
 
 // ── куда отправлять ──
 function renderDests(){
-  const pc = '<button class="chip' + (dest === 'pc' ? ' on' : '') + '" data-d="pc">' + gi('pc') + '<span><b>' + esc(ME.node) + '</b><span class="s">этот ПК · в «приём»</span></span></button>';
+  const pc = '<button class="chip' + (dest === 'pc' ? ' on' : '') + '" data-d="pc">' + gi('pc') + '<span><b>' + esc(ME.node) + '</b><span class="s">этот ПК · в «inbox»</span></span></button>';
   const ps = (ME.peers || []).map(p => '<button class="chip' + (dest === p.name ? ' on' : '') + '" data-d="' + esc(p.name) + '"><i class="dot' + (p.online ? ' on' : '') + '"></i><span><b>' + esc(p.title || p.name) + '</b><span class="s">' + (p.online ? 'сосед · на связи' : 'сосед · заберёт позже') + '</span></span></button>').join('');
   $('#dests').innerHTML = pc + ps;
   $('#dests').querySelectorAll('.chip').forEach(c => c.onclick = () => { dest = c.dataset.d; renderDests(); });

@@ -287,7 +287,7 @@ pub fn accept(node: &Arc<Node>, offer: &str) -> Result<(), String> {
         match r {
             Ok(()) => {
                 set_state(&n, &offer, "done", "");
-                n.info(&format!("[приложения] «{}» {} от «{}» — в папке «приложения»; откройте его и разрешите", e["name"].as_str().unwrap_or(""), e["version"].as_str().unwrap_or(""), e["from"].as_str().unwrap_or("")));
+                n.info(&format!("[приложения] «{}» {} от «{}» — в папке «apps»; откройте его и разрешите", e["name"].as_str().unwrap_or(""), e["version"].as_str().unwrap_or(""), e["from"].as_str().unwrap_or("")));
             }
             Err(err) => {
                 n.info(&format!("[приложения] «{}» от «{}» не принято: {}", e["name"].as_str().unwrap_or(""), e["from"].as_str().unwrap_or(""), err));

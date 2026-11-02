@@ -1158,8 +1158,8 @@ async fn mailbox_cancel(State(node): St, Query(m): Q) -> Response {
     let Some(peer) = node.cfg.read().peer(q(&m, "peer")).cloned() else { return err(400, "нужны peer и path") };
     let Some(p) = path::norm(q(&m, "path")) else { return err(400, "нужны peer и path") };
     let Some((_, full)) = node.mailbox.pending(&node, &peer).into_iter().find(|(e, _)| eq_ic(&e.path, &p)) else { return err(404, "уже отправлен или нет такого") };
-    // не удаляем — убираем в «_отменено», чтобы ничего не потерять
-    let Ok(dest) = path::to_local(&node.mailbox.out_root(&node).join("_отменено").join(&peer.name), &p) else { return err(400, "путь") };
+    // не удаляем — убираем в «_cancelled», чтобы ничего не потерять
+    let Ok(dest) = path::to_local(&node.mailbox.out_root(&node).join("_cancelled").join(&peer.name), &p) else { return err(400, "путь") };
     if let Some(d) = dest.parent() {
         let _ = std::fs::create_dir_all(d);
     }
@@ -1623,7 +1623,7 @@ async fn fs_upload(State(node): St, Query(m): Q, req: Request) -> Response {
         return err(403, "папка только для чтения");
     }
     let p = match path::normalize(q(&m, "path")) {
-        Ok(p) if p.split('/').next() != Some(crate::folders::MY_EDITS_DIR) => p,
+        Ok(p) if !matches!(p.split('/').next(), Some(crate::folders::MY_EDITS_DIR) | Some(crate::folders::MY_EDITS_LEGACY)) => p,
         Ok(_) => return err(400, "путь"),
         Err(w) => return err(400, format!("путь: {}", w)),
     };
@@ -1904,7 +1904,7 @@ async fn shares_set(State(node): St, Json(r): Json<ShareReq>) -> Response {
     if !bridge_core::config::is_name(&id) {
         return err(400, "id пространства — латиница, цифры, «-», «_»");
     }
-    let folder = if r.folder.trim().is_empty() { format!("Пространства/{}", id) } else { r.folder.trim().to_string() };
+    let folder = if r.folder.trim().is_empty() { format!("spaces/{}", id) } else { r.folder.trim().to_string() };
     let (fresh, reopen) = {
         let _g = node.config_lock.lock();
         let mut clone = node.cfg.read().clone();

@@ -144,7 +144,11 @@ pub fn focus_panel(node: &str) -> bool {
 
 pub fn run() {
     if let Ok(e) = std::env::current_exe() {
+        let e = ascii_exe(e);
         let _ = EXE.set(e);
+        if autostart_enabled() {
+            set_autostart(true); // автозапуск — на текущее имя программы
+        }
     }
     let after_update = std::env::args().any(|a| a == "--after-update");
     // Один экземпляр: второй запуск открывает панель первого
@@ -565,6 +569,29 @@ fn autostart_enabled() -> bool {
     }
 }
 
+/// (3.13) Программа называется Most.exe. Запущены под прежним именем (Мост.exe) — переименовать себя (Windows
+/// разрешает переименовать запущенный exe); рядом остался старый Мост.exe — в «Мост.exe.old» (уберётся при запуске,
+/// как после обновления). Не вышло — работаем как есть, попробуем при следующем запуске.
+fn ascii_exe(e: std::path::PathBuf) -> std::path::PathBuf {
+    use bridge_node::update::{APP_EXE, LEGACY_EXE};
+    let Some(dir) = e.parent().map(|p| p.to_path_buf()) else { return e };
+    let name = e.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if name.eq_ignore_ascii_case(LEGACY_EXE) || name == LEGACY_EXE {
+        let to = dir.join(APP_EXE);
+        if !to.exists() && std::fs::rename(&e, &to).is_ok() {
+            return to;
+        }
+        return e;
+    }
+    if name.eq_ignore_ascii_case(APP_EXE) && dir.join(LEGACY_EXE).exists() {
+        let old = dir.join(format!("{}.old", LEGACY_EXE));
+        if !old.exists() {
+            let _ = std::fs::rename(dir.join(LEGACY_EXE), old);
+        }
+    }
+    e
+}
+
 fn set_autostart(on: bool) {
     unsafe {
         let mut key: HKEY = null_mut();
@@ -574,7 +601,7 @@ fn set_autostart(on: bool) {
         }
         let name = w(RUN_VALUE);
         if on {
-            let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+            let exe = EXE.get().cloned().or_else(|| std::env::current_exe().ok()).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
             let args: Vec<String> = std::env::args().collect();
             let cfg = args.iter().position(|a| a.eq_ignore_ascii_case("--config")).and_then(|i| args.get(i + 1)).map(|c| format!(" --config \"{}\"", c)).unwrap_or_default();
             let val = w(&format!("\"{}\" --tray{}", exe, cfg));
@@ -943,7 +970,11 @@ fn unused(_: Ordering) {}
 
 /// Запустить новую версию (те же параметры + --tray --after-update); старая уже остановила узел и выходит.
 fn restart_after_update() {
-    let exe = EXE.get().cloned().or_else(|| std::env::current_exe().ok()).unwrap_or_default();
+    let mut exe = EXE.get().cloned().or_else(|| std::env::current_exe().ok()).unwrap_or_default();
+    // запущены под прежним именем, а обновление положило Most.exe — запускать его
+    if let Some(new) = exe.parent().map(|d| d.join(bridge_node::update::APP_EXE)).filter(|p| p.exists()) {
+        exe = new;
+    }
     let args: Vec<String> = std::env::args().skip(1).filter(|a| a != "--after-update" && a != "--tray").collect();
     let _ = std::process::Command::new(&exe).args(&args).arg("--tray").arg("--after-update").spawn();
 }

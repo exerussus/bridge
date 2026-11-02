@@ -198,6 +198,8 @@ impl Node {
         let data_dir = base_dir.join(&cfg.data_dir);
         std::fs::create_dir_all(&data_dir).map_err(|e| format!("Папка данных {}: {}", data_dir.display(), e))?;
         crate::pack::clean_tmp(&data_dir.join("tmp"));
+        // 3.13: прежние русские имена папок → английские (до того, как открыты папки и пространства)
+        let renamed = crate::rename::migrate(&base_dir, &data_dir, &mut cfg);
         let token = load_or_create_token(&data_dir);
         let (log_tx, _) = broadcast::channel(256);
         let (events_tx, _) = broadcast::channel(256);
@@ -267,6 +269,14 @@ impl Node {
             }
         }
         node.apply_limits();
+        for l in &renamed.lines {
+            node.info(&format!("Имена папок (3.13): {}", l));
+        }
+        if renamed.config_changed {
+            if let Some(e) = node.save_config() {
+                node.info(&format!("Имена папок (3.13): настройки не сохранены — {}", e));
+            }
+        }
         if lifted {
             let e = node.save_config();
             node.info(&format!("Предел размера файла снят (было 512 МБ — прежнее значение по умолчанию){}", e.map(|e| format!(" — не сохранено: {}", e)).unwrap_or_default()));

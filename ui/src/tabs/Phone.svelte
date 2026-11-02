@@ -74,7 +74,7 @@
   <div>
     <div class="card"><h3>Подключить телефон</h3>
       {#if !pair}
-        <div class="small muted" style="margin-bottom:12px">Телефон откроет мост в браузере. Один раз отсканируйте QR-код — дальше телефон работает с этим ПК сам: отправляет сюда и соседям, получает файлы «на телефон», видит общие папки.</div>
+        <div class="small muted" style="margin-bottom:12px">Телефон откроет мост в браузере. Один раз отсканируйте QR-код — дальше телефон работает с этим ПК сам: отправляет сюда и соседям, получает файлы из папки «to-phone», видит общие папки.</div>
         <label class="f">Доступ телефона<select bind:value={rights}><option value="full">полный — всё, что умеет панель (кроме голоса)</option><option value="files">только файлы</option></select></label>
         <button class="b pri" style="width:100%" onclick={startPair}>Подключить телефон</button>
       {:else}

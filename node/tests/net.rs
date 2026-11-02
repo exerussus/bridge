@@ -373,13 +373,13 @@ async fn file_interface_outbox_to_inbox() {
 async fn mailbox_send_receive_ack_delete() {
     let mut net = pair();
     net.start().await;
-    let out_dev = net.root.join("dev/отправка");
+    let out_dev = net.root.join("dev/outbox");
     assert!(out_dev.join("stand").is_dir(), "папка соседа создана сама");
     std::fs::create_dir_all(out_dev.join("stand/сервер/data")).unwrap();
     std::fs::write(out_dev.join("stand/сервер/data/users.json"), "{\"a\":1}").unwrap();
     std::fs::write(out_dev.join("stand/модель.bin"), vec![0u8; 300_000]).unwrap();
     net.sync(1, &["stand", "dev"]).await;
-    let in_stand = net.root.join("stand/приём/dev");
+    let in_stand = net.root.join("stand/inbox/dev");
     assert_eq!(std::fs::read_to_string(in_stand.join("сервер/data/users.json")).unwrap(), "{\"a\":1}");
     assert_eq!(std::fs::metadata(in_stand.join("модель.bin")).unwrap().len(), 300_000);
     assert!(!out_dev.join("stand/модель.bin").exists(), "после подтверждения у отправителя удалён");
@@ -391,10 +391,10 @@ async fn mailbox_send_receive_ack_delete() {
     net.sync(1, &["stand"]).await;
     assert!(in_stand.join("сервер/data/users (2).json").exists(), "одноимённый — рядом, не поверх");
     net.n("dev").cfg.write().mailbox.accept_from = vec!["кто-то".into()];
-    std::fs::write(net.root.join("stand/отправка/dev/отчёт.txt"), "x").unwrap();
+    std::fs::write(net.root.join("stand/outbox/dev/отчёт.txt"), "x").unwrap();
     net.sync(1, &["dev"]).await;
-    assert!(!net.root.join("dev/приём/stand/отчёт.txt").exists(), "приём от не разрешённого — нет");
-    assert!(net.root.join("stand/отправка/dev/отчёт.txt").exists(), "у отправителя ждёт");
+    assert!(!net.root.join("dev/inbox/stand/отчёт.txt").exists(), "приём от не разрешённого — нет");
+    assert!(net.root.join("stand/outbox/dev/отчёт.txt").exists(), "у отправителя ждёт");
     net.stop().await;
 }
 
@@ -417,7 +417,7 @@ fn own(net: &Net, id: &str, p: &str) -> std::path::PathBuf {
 }
 
 fn mnt(net: &Net, id: &str, p: &str) -> std::path::PathBuf {
-    net.root.join("stand/общие/dev").join(id).join(p)
+    net.root.join("stand/shared/dev").join(id).join(p)
 }
 
 fn put(p: &std::path::Path, text: &str) {
@@ -458,7 +458,7 @@ async fn shared_folder_read_only_keeps_own_edits() {
     net.sync(1, &["stand"]).await;
     assert_eq!(std::fs::read_to_string(own(&net, "chitalka", "a.txt")).unwrap(), "оригинал", "у хозяина не тронуто");
     assert_eq!(std::fs::read_to_string(mnt(&net, "chitalka", "a.txt")).unwrap(), "оригинал", "копия восстановлена");
-    assert_eq!(std::fs::read_to_string(mnt(&net, "chitalka", "_мои-правки/a.txt")).unwrap(), "моя правка", "своя правка сохранена");
+    assert_eq!(std::fs::read_to_string(mnt(&net, "chitalka", "_my-edits/a.txt")).unwrap(), "моя правка", "своя правка сохранена");
     net.stop().await;
 }
 
@@ -673,7 +673,7 @@ async fn groups_give_folder_access() {
     net.start().await;
     put(&net.root.join("dev/фото/1.jpg"), "jpg");
     net.sync(1, &["stand"]).await;
-    assert_eq!(std::fs::read_to_string(net.root.join("stand/общие/dev/foto/1.jpg")).unwrap(), "jpg", "член группы получил папку");
+    assert_eq!(std::fs::read_to_string(net.root.join("stand/shared/dev/foto/1.jpg")).unwrap(), "jpg", "член группы получил папку");
     net.n("dev").cfg.write().groups.get_mut("family").unwrap().members.clear();
     net.sync(1, &["stand"]).await;
     assert!(net.n("stand").folders.find_mount("dev", "foto").unwrap().revoked, "убрали из группы — доступ закрыт");
@@ -893,7 +893,7 @@ async fn agent_exchange_folder_files_reach_orchestrator() {
     let devn = net.n("dev").clone();
     let t = bridge_node::agent::ask(&devn, "stand", "сделай отчёт", None, None).await.expect("поручено");
     agent_wait_status(&net, "dev", &t.id, &["idle"]).await;
-    let on_stand = net.root.join("stand/общие/dev/agent-obmen/report.txt");
+    let on_stand = net.root.join("stand/shared/dev/agent-obmen/report.txt");
     assert!(on_stand.is_file(), "исполнитель положил отчёт в обменную папку: {}", on_stand.display());
     net.sync(1, &["stand"]).await;
     let on_dev = net.root.join("dev/обмен/report.txt");
@@ -978,16 +978,16 @@ async fn phone_files_both_ways() {
     let body = vec![7u8; 300_000];
     let r = h.post(format!("{}/m/upload?path=фото.jpg&size=300000", url)).header("Cookie", &cookie).header("X-Bridge-M", "1").body(body.clone()).send().await.unwrap();
     assert_eq!(r.status().as_u16(), 200);
-    assert_eq!(std::fs::read(net.root.join("dev/приём/Pixel/фото.jpg")).unwrap(), body);
+    assert_eq!(std::fs::read(net.root.join("dev/inbox/Pixel/фото.jpg")).unwrap(), body);
     // недописанный файл не появляется
     let r = h.post(format!("{}/m/upload?path=обрыв.bin&size=999999", url)).header("Cookie", &cookie).header("X-Bridge-M", "1").body(vec![1u8; 10]).send().await.unwrap();
     assert_eq!(r.status().as_u16(), 400);
-    assert!(!net.root.join("dev/приём/Pixel/обрыв.bin").exists());
+    assert!(!net.root.join("dev/inbox/Pixel/обрыв.bin").exists());
     // с телефона соседу — через этот ПК
     let r = h.post(format!("{}/m/api/mailbox/upload?peer=stand&path=соседу.txt", url)).header("Cookie", &cookie).header("X-Bridge-M", "1").body("привет").send().await.unwrap();
     assert_eq!(r.status().as_u16(), 200);
     net.sync(2, &["stand", "dev"]).await;
-    assert_eq!(std::fs::read_to_string(net.root.join("stand/приём/dev/соседу.txt")).unwrap(), "привет", "сосед получил от ПК");
+    assert_eq!(std::fs::read_to_string(net.root.join("stand/inbox/dev/соседу.txt")).unwrap(), "привет", "сосед получил от ПК");
     // с ПК на телефон: ассистент кладёт файл, телефон видит и скачивает
     let src = net.root.join("отчёт.pdf");
     std::fs::write(&src, b"PDF").unwrap();
@@ -1000,7 +1000,7 @@ async fn phone_files_both_ways() {
     assert_eq!(&got[..], b"PDF");
     let v: serde_json::Value = h.get(format!("{}/m/outbox", url)).header("Cookie", &cookie).send().await.unwrap().json().await.unwrap();
     assert_eq!(v["files"][0]["got"], true, "скачан — отмечен");
-    assert!(net.root.join("dev/на телефон/Pixel/отчёт.pdf").is_file(), "папка «на телефон/Pixel» видна в Проводнике");
+    assert!(net.root.join("dev/to-phone/Pixel/отчёт.pdf").is_file(), "папка «to-phone/Pixel» видна в Проводнике");
     net.stop().await;
 }
 
@@ -1059,7 +1059,7 @@ async fn assistant_host_and_client() {
     let ins: Vec<&Value> = chat["items"].as_array().unwrap().iter().filter(|v| v["dir"] == "in").collect();
     assert_eq!(ins.len(), 1);
     assert_eq!(ins[0]["buttons"][0][0]["action"], "snooze");
-    assert_eq!(std::fs::read_to_string(net.root.join("stand/приём/ассистент/Список.md")).unwrap(), "Спи");
+    assert_eq!(std::fs::read_to_string(net.root.join("stand/inbox/assistant/Список.md")).unwrap(), "Спи");
     assert_eq!(chat["unread"], 1);
     // кнопка → входящее action у хозяина, кнопки этого ответа нажаты
     local(&net, "stand", "POST", "assistant/send", Some(json!({ "kind": "action", "action": { "name": "snooze", "args": { "min": 10 } }, "label": "+10 мин", "replyTo": "r-1" }))).await;
@@ -1691,7 +1691,7 @@ async fn builds_patch_and_clean() {
         for _ in 0..100 { if p.exists() { return true; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
         false
     };
-    let target = stand.base_dir.join("сборки").join("Game");
+    let target = stand.base_dir.join("builds").join("Game");
     // первая — целиком, хоть и «патч»
     bridge_node::builds::send(&dev, "stand", src.to_str().unwrap(), "Game", "patch").unwrap();
     wait("1").await;
@@ -1768,7 +1768,7 @@ async fn build_presets_ignore() {
     assert_eq!(h["preset"], "game");
     assert_eq!((h["n"].clone(), h["note"].clone()), (json!(1), json!("починил сохранения")));
     net.sync(1, &["stand"]).await;
-    let target = stand.base_dir.join("сборки").join("Game2");
+    let target = stand.base_dir.join("builds").join("Game2");
     for _ in 0..100 { if target.join("Game.exe").exists() { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
     assert!(target.join("Game_Data/Managed/Keep.pdb").exists());
     assert!(!target.join("Game_Data/Managed/A.pdb").exists());
@@ -1881,7 +1881,7 @@ async fn apps_folder_consent_actions() {
     apps::remove(&dev, "hello2").unwrap();
     apps::scan(&dev);
     assert!(apps::get(&dev, "hello2").is_none());
-    assert!(dev.folders.trash_dir().join("приложения").read_dir().unwrap().count() >= 1, "убрано в корзину");
+    assert!(dev.folders.trash_dir().join("apps").read_dir().unwrap().count() >= 1, "убрано в корзину");
     net.stop().await;
 }
 
@@ -2470,13 +2470,13 @@ async fn transfers_go_as_pack() {
     let pl = net.n("stand").folders.plan(net.n("stand"), "dev", "obshee", "").await.unwrap();
     assert_eq!(pl["total"], 0, "{}", pl);
     // «Отправка»
-    let out = net.root.join("dev/отправка/stand/пачка");
+    let out = net.root.join("dev/outbox/stand/пачка");
     for i in 0..10 {
         put(&out.join(format!("{}.txt", i)), &i.to_string());
     }
     net.sync(1, &["stand", "dev"]).await;
     for i in 0..10 {
-        assert_eq!(std::fs::read_to_string(net.root.join(format!("stand/приём/dev/пачка/{}.txt", i))).unwrap(), i.to_string());
+        assert_eq!(std::fs::read_to_string(net.root.join(format!("stand/inbox/dev/пачка/{}.txt", i))).unwrap(), i.to_string());
     }
     assert!(!out.exists() || std::fs::read_dir(&out).unwrap().next().is_none(), "подтверждено и убрано у отправителя");
     // пространство

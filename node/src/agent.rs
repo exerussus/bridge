@@ -637,7 +637,7 @@ pub fn find_claude(node: &Node) -> Option<PathBuf> {
 /// Папка, где работает Claude.
 pub fn work_dir(node: &Node) -> PathBuf {
     let w = node.cfg.read().agent.work_dir.clone();
-    let p = if w.trim().is_empty() { node.base_dir.join("агент") } else { node.resolve(w.trim()) };
+    let p = if w.trim().is_empty() { node.base_dir.join("agent") } else { node.resolve(w.trim()) };
     let _ = std::fs::create_dir_all(&p);
     p
 }

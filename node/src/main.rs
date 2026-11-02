@@ -466,7 +466,7 @@ fn app_cli(o: &Opts) -> Result<i32, String> {
             let id = arg(o, 2, "id приложения")?;
             let dir = std::path::PathBuf::from(o.pos.get(3).cloned().unwrap_or_else(|| id.to_string()));
             bridge_node::apps::template(&dir, id)?;
-            println!("Заготовка: {}\nПоложите папку в «приложения» рядом с мостом — он подхватит её сам.", dir.display());
+            println!("Заготовка: {}\nПоложите папку в «apps» рядом с мостом — он подхватит её сам.", dir.display());
             Ok(0)
         }
         "check" => {

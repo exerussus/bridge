@@ -1,5 +1,5 @@
 @echo off
-rem Сборка «Моста» 3.0 на Windows: publish\Мост.exe (окно приложения + значок у часов) и publish\bridge.exe (консоль, скрипты).
+rem Сборка «Моста» 3.0 на Windows: publish\Most.exe (окно приложения + значок у часов) и publish\bridge.exe (консоль, скрипты).
 rem Нужно:  Rust — winget install Rustlang.Rustup   (установщик предложит Visual Studio Build Tools — согласиться)
 rem         Node.js — winget install OpenJS.NodeJS.LTS   (для панели; без него берётся готовая ui\dist, если она есть)
 rem Ключи:  build.cmd notest  — собрать без тестов
@@ -31,8 +31,8 @@ echo [2/4] Программа...
 cargo build --release -p bridge-node -p bridge-app || goto :fail
 if not exist publish mkdir publish
 copy /y target\release\bridge.exe publish\bridge.exe >nul || goto :fail
-copy /y target\release\bridge-app.exe "publish\Мост.exe" >nul || goto :fail
-echo       publish\Мост.exe и publish\bridge.exe готовы
+copy /y target\release\bridge-app.exe "publish\Most.exe" >nul || goto :fail
+echo       publish\Most.exe и publish\bridge.exe готовы
 
 if /i "%~1"=="notest" goto :done
 echo [3/4] Тесты (около минуты; брандмауэр может спросить про доступ — тесты работают только на 127.0.0.1)...
@@ -42,8 +42,8 @@ echo       тесты прошли (подробно: publish\tests.log)
 :done
 echo [4/4] Готово.
 echo.
-echo Установка: закройте старый «Мост» (значок у часов → Выход), положите Мост.exe и bridge.exe в его папку
-echo (рядом с bridge.json) и запустите Мост.exe. Настройки, соседи, история и папки подхватятся.
+echo Установка: закройте старый «Мост» (значок у часов → Выход), положите Most.exe и bridge.exe в его папку
+echo (рядом с bridge.json) и запустите Most.exe. Настройки, соседи, история и папки подхватятся.
 exit /b 0
 
 :testfail

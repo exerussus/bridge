@@ -1,5 +1,5 @@
 //! Обновление моста от соседа. «Поделиться версией»: соседям на связи со старой версией уходит предложение (версия,
-//! размеры и sha256 файлов, что нового). Сосед подтверждает — его мост скачивает у нас Мост.exe и bridge.exe, сверяет
+//! размеры и sha256 файлов, что нового). Сосед подтверждает — его мост скачивает у нас Most.exe и bridge.exe, сверяет
 //! sha256, переименовывает свои запущенные файлы в *.old (Windows это разрешает), кладёт новые и перезапускается.
 //! Новый запуск убирает *.old. Соседу со старой версией (без этой возможности) файлы уходят обычной отправкой.
 
@@ -13,6 +13,41 @@ use std::sync::Arc;
 
 /// С этой версии мост умеет принимать обновление по сети.
 pub const MIN_AUTO: &str = "2.12.0";
+
+/// Программа с окном и значком (с 3.13 — латиницей).
+pub const APP_EXE: &str = "Most.exe";
+/// Прежнее имя (до 3.13). Мостам старше 3.13 версия уходит под ним — другого имени они не примут; запустившись,
+/// новая версия сама переименует себя в Most.exe.
+pub const LEGACY_EXE: &str = "Мост.exe";
+/// С этой версии мост знает имя Most.exe.
+pub const ASCII_EXE_SINCE: &str = "3.13.0";
+
+/// Имя файла для соседа версии `ver`: старым — прежнее имя программы.
+pub fn wire_name<'a>(name: &'a str, ver: &str) -> &'a str {
+    if name == APP_EXE && !ver.is_empty() && cmp(ver, ASCII_EXE_SINCE) == Ordering::Less {
+        LEGACY_EXE
+    } else {
+        name
+    }
+}
+
+/// Имя, под которым файл лежит здесь (прежнее имя программы — то же, что Most.exe).
+pub fn local_name(name: &str) -> Option<&'static str> {
+    if name == LEGACY_EXE {
+        return Some(if cfg!(windows) { APP_EXE } else { "bridge-app" });
+    }
+    names().iter().find(|n| **n == name).copied()
+}
+
+/// Путь к своему файлу программы: Most.exe, а если мост ещё не переименовался — Мост.exe.
+pub fn local_path(dir: &std::path::Path, name: &str) -> Option<PathBuf> {
+    let n = local_name(name)?;
+    let p = dir.join(n);
+    if !p.exists() && n == APP_EXE && dir.join(LEGACY_EXE).exists() {
+        return Some(dir.join(LEGACY_EXE));
+    }
+    Some(p)
+}
 
 pub struct Updates {
     /// Предложение от соседа: {from, version, files, notes, time}.
@@ -47,7 +82,7 @@ pub fn cmp(a: &str, b: &str) -> Ordering {
 
 pub fn names() -> &'static [&'static str] {
     if cfg!(windows) {
-        &["Мост.exe", "bridge.exe"]
+        &[APP_EXE, "bridge.exe"]
     } else {
         &["bridge-app", "bridge"]
     }
@@ -78,7 +113,7 @@ pub fn own_files(node: &Node) -> Vec<(String, PathBuf, u64, String)> {
     names()
         .iter()
         .filter_map(|n| {
-            let p = dir.join(n);
+            let p = local_path(&dir, n)?;
             let b = std::fs::read(&p).ok()?;
             Some((n.to_string(), p, b.len() as u64, hex::encode(Sha256::digest(&b))))
         })
@@ -107,7 +142,7 @@ pub fn notes_since(since: &str) -> String {
 /// После перезапуска: убрать *.old от прошлого обновления.
 pub fn cleanup(node: &Node) {
     let dir = node.updates.dir();
-    for n in names() {
+    for n in names().iter().chain([LEGACY_EXE].iter()) {
         let _ = std::fs::remove_file(dir.join(format!("{}.old", n)));
     }
     let marker = node.data_dir.join("update-done.json");
@@ -139,7 +174,8 @@ pub async fn offer(node: &Arc<Node>, only: &[String]) -> Value {
             format!("уже {}", st.version)
         } else if cmp(&st.version, MIN_AUTO) == Ordering::Less {
             // старый мост сам обновиться не умеет — файлы обычной отправкой
-            match send_files(node, &p.name, &files) {
+            let old: Vec<_> = files.iter().map(|(n, p, s, h)| (wire_name(n, &st.version).to_string(), p.clone(), *s, h.clone())).collect();
+            match send_files(node, &p.name, &old) {
                 Ok(dir) => {
                     if cmp(&st.version, "2.10.0") != Ordering::Less {
                         let _ = crate::chat::send(node, &format!("dm:{}", p.name), &format!("Новая версия моста {}: файлы — в «{}». Закройте мост (трей → «Выход»), замените Мост.exe и bridge.exe этими и запустите снова. Дальше обновления будут приходить сами.", mine, dir), "").await;
@@ -151,7 +187,7 @@ pub async fn offer(node: &Arc<Node>, only: &[String]) -> Value {
         } else {
             let body = json!({
                 "version": mine,
-                "files": files.iter().map(|(n, _, s, h)| json!({ "name": n, "size": s, "sha256": h })).collect::<Vec<_>>(),
+                "files": files.iter().map(|(n, _, s, h)| json!({ "name": wire_name(n, &st.version), "size": s, "sha256": h })).collect::<Vec<_>>(),
                 "notes": notes_since(&st.version),
             });
             let c = node.client_for(&p);
@@ -170,7 +206,7 @@ pub async fn offer(node: &Arc<Node>, only: &[String]) -> Value {
 
 /// Старому мосту — файлы через «Отправку» (в его «приём/<мы>/Мост <версия>/»).
 fn send_files(node: &Node, peer: &str, files: &[(String, PathBuf, u64, String)]) -> Result<String, String> {
-    let sub = format!("Мост {}", bridge_core::APP_VERSION);
+    let sub = format!("Most {}", bridge_core::APP_VERSION);
     let dir = node.mailbox.out_root(node).join(peer).join(&sub);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     for (n, p, _, _) in files {
@@ -187,7 +223,7 @@ pub fn on_offer(node: &Node, from: &str, v: &Value) -> Result<(), (u16, String)>
         return Err((409, format!("здесь уже {}", bridge_core::APP_VERSION)));
     }
     let files = v["files"].as_array().cloned().unwrap_or_default();
-    if files.is_empty() || files.iter().any(|f| !names().contains(&f["name"].as_str().unwrap_or("")) || f["sha256"].as_str().map(|h| h.len() != 64).unwrap_or(true)) {
+    if files.is_empty() || files.iter().any(|f| local_name(f["name"].as_str().unwrap_or("")).is_none() || f["sha256"].as_str().map(|h| h.len() != 64).unwrap_or(true)) {
         return Err((400, "неверный список файлов".into()));
     }
     let st = node.updates.status.lock().0.clone();
@@ -244,7 +280,8 @@ pub async fn accept(node: &Arc<Node>) -> Result<(), String> {
     let dir = node.updates.dir();
     let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
     for f in &files {
-        let name = f["name"].as_str().unwrap_or("");
+        let wire = f["name"].as_str().unwrap_or("");
+        let name = local_name(wire).unwrap_or(wire);
         let target = dir.join(name);
         let old = dir.join(format!("{}.old", name));
         let _ = std::fs::remove_file(&old);
@@ -258,7 +295,7 @@ pub async fn accept(node: &Arc<Node>) -> Result<(), String> {
                 return Err(fail(format!("не удалось заменить «{}»: {}", name, e)));
             }
         }
-        if let Err(e) = std::fs::rename(tmp.join(name), &target).or_else(|_| std::fs::copy(tmp.join(name), &target).map(|_| ())) {
+        if let Err(e) = std::fs::rename(tmp.join(wire), &target).or_else(|_| std::fs::copy(tmp.join(wire), &target).map(|_| ())) {
             let _ = std::fs::rename(&old, &target);
             for (t, o) in done.iter().rev() {
                 let _ = std::fs::remove_file(t);
@@ -317,4 +354,34 @@ pub fn take_rejoin(node: &Node) -> Option<Value> {
     let v = read_rejoin(node);
     let _ = std::fs::remove_file(rejoin_file(node));
     v
+}
+
+#[cfg(test)]
+mod exe_name_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_exe_name_for_old_peers() {
+        // мостам до 3.13 программа уходит под прежним именем, остальным — Most.exe; bridge.exe не меняется
+        assert_eq!(wire_name(APP_EXE, "3.12.0"), LEGACY_EXE);
+        assert_eq!(wire_name(APP_EXE, "3.13.0"), APP_EXE);
+        assert_eq!(wire_name(APP_EXE, ""), APP_EXE);
+        assert_eq!(wire_name("bridge.exe", "3.0.0"), "bridge.exe");
+        // прежнее имя принимается и кладётся как своя программа
+        assert!(local_name(LEGACY_EXE).is_some());
+        assert!(local_name("evil.exe").is_none());
+    }
+
+    #[test]
+    fn serves_legacy_file_until_renamed() {
+        let d = std::env::temp_dir().join(format!("bridge-exe-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&d).unwrap();
+        if cfg!(windows) {
+            std::fs::write(d.join(LEGACY_EXE), b"old").unwrap();
+            assert_eq!(local_path(&d, APP_EXE).unwrap(), d.join(LEGACY_EXE));
+            std::fs::write(d.join(APP_EXE), b"new").unwrap();
+            assert_eq!(local_path(&d, LEGACY_EXE).unwrap(), d.join(APP_EXE));
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

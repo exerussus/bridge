@@ -1181,13 +1181,13 @@ async fn peer_apps_pkg(State(node): St, Query(m): Query<HashMap<String, String>>
     }
 }
 
-/// Отдать свой файл программы (только Мост.exe / bridge.exe из своей папки) соседу, которому мы предложили версию.
+/// Отдать свой файл программы (только Most.exe / bridge.exe из своей папки; старым соседям Most.exe — под прежним именем) соседу, которому мы предложили версию.
 async fn peer_update_file(State(node): St, Query(m): Query<HashMap<String, String>>) -> Response {
     let name = m.get("name").cloned().unwrap_or_default();
-    if !crate::update::names().contains(&name.as_str()) {
+    let Some(path) = crate::update::local_path(&node.updates.dir(), &name) else {
         return err(404, "такого файла нет");
-    }
-    match tokio::fs::read(node.updates.dir().join(&name)).await {
+    };
+    match tokio::fs::read(path).await {
         Ok(b) => {
             let mut r = Response::new(Body::from(b));
             r.headers_mut().insert("Content-Type", HeaderValue::from_static("application/octet-stream"));

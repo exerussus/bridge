@@ -19,7 +19,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Папка в отправке/приёме, по которой узнаются сборки.
-pub const DIR: &str = "_сборки";
+pub const DIR: &str = "_builds";
+/// Прежнее имя (до 3.13): так шлём мостам старше 3.13 и так же принимаем от них.
+pub const DIR_LEGACY: &str = "_сборки";
+
+/// Папка сборок в отправке для этого соседа: старым мостам — прежнее имя, иначе они не распакуют.
+fn dir_for(node: &Node, peer: &str) -> &'static str {
+    let v = node.peer_state(peer).version;
+    if !v.is_empty() && crate::update::cmp(&v, "3.13.0") == std::cmp::Ordering::Less { DIR_LEGACY } else { DIR }
+}
 const META: &str = "_most-build.json";
 
 #[derive(Default)]
@@ -304,7 +312,7 @@ pub fn target_dir(node: &Node, peer: &str, name: &str) -> PathBuf {
     if let Some(p) = t[format!("{}/{}", peer.to_lowercase(), name)].as_str().filter(|p| !p.trim().is_empty()) {
         return node.resolve(p);
     }
-    node.base_dir.join("сборки").join(crate::mobile::folder_name(name))
+    node.base_dir.join("builds").join(crate::mobile::folder_name(name))
 }
 
 pub fn set_target(node: &Node, peer: &str, name: &str, p: &str) -> Result<(), String> {
@@ -369,7 +377,7 @@ pub fn status(node: &Node) -> Value {
         "received": received,
         "jobs": node.builds.jobs.lock().values().cloned().collect::<Vec<_>>(),
         "presets": presets(node),
-        "defaultRoot": node.base_dir.join("сборки").display().to_string(),
+        "defaultRoot": node.base_dir.join("builds").display().to_string(),
     })
 }
 
@@ -537,7 +545,7 @@ fn pack(node: &Arc<Node>, peer: &str, src: &Path, name: &str, mode: &str, key: &
         return Err("с прошлой отправки ничего не изменилось — патч пустой".into());
     }
     let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-    let rel = format!("{}/{}/{}-{}.zip", DIR, name, mode, ts);
+    let rel = format!("{}/{}/{}-{}.zip", dir_for(node, peer), name, mode, ts);
     let out = path::to_local(&node.mailbox.out_root(node).join(peer), &rel).map_err(|_| "путь".to_string())?;
     if let Some(d) = out.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
@@ -587,7 +595,7 @@ fn pack(node: &Arc<Node>, peer: &str, src: &Path, name: &str, mode: &str, key: &
 /// Принятый файл ручной отправки: если это сборка — распаковать. `rel` — путь в «приём/<сосед>/».
 pub fn on_received(node: &Arc<Node>, peer: &str, file: &Path, rel_in_peer: &str) {
     let parts: Vec<&str> = rel_in_peer.split('/').collect();
-    if parts.len() != 3 || !eq_ic(parts[0], DIR) || !parts[2].to_lowercase().ends_with(".zip") {
+    if parts.len() != 3 || !(eq_ic(parts[0], DIR) || eq_ic(parts[0], DIR_LEGACY)) || !parts[2].to_lowercase().ends_with(".zip") {
         return;
     }
     let (n2, peer, file, name) = (node.clone(), peer.to_string(), file.to_path_buf(), parts[1].to_string());
@@ -629,7 +637,7 @@ fn install(node: &Arc<Node>, peer: &str, zipf: &Path, name: &str) -> Result<Valu
     // чистая: прежняя папка — в корзину (вернуть можно оттуда)
     let mut old = String::new();
     if mode == "clean" && target.is_dir() && std::fs::read_dir(&target).map(|mut d| d.next().is_some()).unwrap_or(false) {
-        let to = node.folders.trash_dir().join("сборки").join(format!("{}--{}", crate::mobile::folder_name(&name), chrono::Local::now().format("%Y%m%d-%H%M%S")));
+        let to = node.folders.trash_dir().join("builds").join(format!("{}--{}", crate::mobile::folder_name(&name), chrono::Local::now().format("%Y%m%d-%H%M%S")));
         if let Some(d) = to.parent() {
             std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
         }

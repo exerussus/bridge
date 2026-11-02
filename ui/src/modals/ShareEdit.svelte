@@ -41,7 +41,7 @@
   <label class="f" style="flex:1">Название<input bind:value={title} oninput={onTitle} use:focus placeholder="Проект" /></label>
   <label class="f" style="width:200px">Id (латиницей)<input bind:value={sid} oninput={() => (touched = true)} disabled={!!id} placeholder="project" /></label>
 </div>
-<label class="f">Папка на этом ПК<input class="mono" bind:value={folder} placeholder="Пространства/<id> — рядом с мостом, или полный путь" /></label>
+<label class="f">Папка на этом ПК<input class="mono" bind:value={folder} placeholder="spaces/<id> — рядом с мостом, или полный путь" /></label>
 <div class="f">Кто участвует<div class="row" style="flex-wrap:wrap">
   {#each groups as [g, v]}<label class="chip"><input type="checkbox" value={'@' + g} bind:group={members} /> 👥 {v.title || g}</label>{/each}
   {#each peers as p (p.name)}<label class="chip"><input type="checkbox" value={p.name} bind:group={members} /> {p.title || p.name}</label>{/each}

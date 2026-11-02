@@ -95,7 +95,7 @@ impl Mailbox {
         for p in cfg.peers.iter().filter(|p| p.enabled && !p.pending) {
             let _ = std::fs::create_dir_all(out.join(&p.name));
         }
-        let readme = out.join("_КАК-ОТПРАВИТЬ.txt");
+        let readme = out.join("_HOW-TO-SEND.txt");
         if !readme.exists() {
             let text = format!(
                 "Положите файл или папку в папку соседа (по имени или IP) — узел отправит сам.\r\nКогда сосед подтвердит приём, файл здесь удалится. У соседа он появится в «{}\\{}\\».\r\nСоседи: {}\r\n",

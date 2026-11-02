@@ -93,7 +93,7 @@ pub fn tools() -> Value {
         { "name": "agent_threads", "description": "Все нити: поручения соседям (out), соседей этому ПК (in) и себе (in, local).", "inputSchema": s(json!({}), &[]) },
         { "name": "exchange_folder", "description": "Путь обменной папки на этом ПК (общая с соседом-агентом). Без thread — своя обменная папка; с thread — где лежит обмен для этого поручения.",
           "inputSchema": s(json!({ "thread": { "type": "string" } }), &[]) },
-        { "name": "send_file", "description": "Отправить файл соседу (ручная отправка: появится у него в «приём/<этот ПК>»).",
+        { "name": "send_file", "description": "Отправить файл соседу (ручная отправка: появится у него в «inbox/<этот ПК>»).",
           "inputSchema": s(json!({ "peer": { "type": "string" }, "path": { "type": "string", "description": "путь к файлу на этом ПК" }, "dest": { "type": "string", "description": "имя у соседа (необязательно)" } }), &["peer", "path"]) },
         { "name": "bridge_ui", "description": "Пульт панели моста (голос и экран живут в окне панели; если оно закрыто — мост откроет). action: state, join {channel, quiet?}, leave, mic {on}, deafen {on}, share {quality?: text|motion|low} (человек выбирает, что показать), unshare {id?}, watch {peer|stream, on?}, popout {peer|stream}, call {peers:[…]}, answer {room?}, decline {room?}, volume {peer, value 0..1}, ask_screen {peer}, tab {tab}; доска — board_png, board_view, board_pdf (удобнее bridge_board); показ — screen_shot, screen_point, screen_draw, screen_clear (удобнее bridge_screen).",
           "inputSchema": s(json!({ "action": { "type": "string" }, "args": { "type": "object", "description": "параметры действия" } }), &["action"]) },

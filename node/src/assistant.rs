@@ -395,7 +395,7 @@ impl Assistant {
         }
         let mut files = Vec::new();
         if let Some(list) = body["files"].as_array() {
-            let dir = node.mailbox.in_root(node).join("ассистент");
+            let dir = node.mailbox.in_root(node).join("assistant");
             let _ = std::fs::create_dir_all(&dir);
             for f in list {
                 use base64::Engine;
