@@ -10,9 +10,13 @@ where cargo >nul 2>nul || goto :norust
 echo [1/4] Панель (ui)...
 where npm >nul 2>nul || goto :nonpm
 pushd ui
-if not exist node_modules (
-  call npm ci --no-audit --no-fund || (popd & goto :fail)
-)
+rem зависимости ставятся заново, если package-lock.json изменился с прошлой установки (новые пакеты в выпуске)
+if not exist node_modules goto :npmci
+fc /b package-lock.json node_modules\.bridge-lock >nul 2>nul && goto :npmok
+:npmci
+call npm ci --no-audit --no-fund || (popd & goto :fail)
+copy /y package-lock.json node_modules\.bridge-lock >nul
+:npmok
 call npm run build || (popd & goto :fail)
 popd
 goto :rust

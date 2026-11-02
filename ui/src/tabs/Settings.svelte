@@ -4,6 +4,8 @@
   import { pickFiles } from '../lib/util';
   import { PING_KINDS, playPing, sfx, testTone } from '../lib/audio';
   import { AV, loadAvatars, playJoinSound, remic, setMicGain, applyOut } from '../voice/engine.svelte';
+  import { NS_MODES, nsMode, openMic, closeMic } from '../voice/denoise';
+  import { setSink } from '../lib/audio';
   import { avatarPick, avatarRemove, keyName } from '../lib/avatar';
   import { me } from '../lib/state.svelte';
   import Seg from '../components/Seg.svelte';
@@ -45,18 +47,62 @@
   let MT: any = {};
   async function micTest() {
     if (mt.on) { stopTest(); return; }
-    try { MT.s = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: SET.mic ? { exact: SET.mic } : undefined, echoCancellation: SET.ec, noiseSuppression: SET.ns, autoGainControl: SET.agc } }); }
+    // та же цепочка, что в разговоре: шумоподавление и громкость — уровень показывает то, что услышат другие
+    try { MT.s = await openMic(); }
     catch (e: any) { toast('Микрофон: ' + e.message, 'bad'); return; }
     MT.ac = new AudioContext();
-    const src = MT.ac.createMediaStreamSource(MT.s); MT.g = MT.ac.createGain(); MT.g.gain.value = SET.micGain;
-    const an = MT.ac.createAnalyser(); an.fftSize = 512; src.connect(MT.g).connect(an);
+    const src = MT.ac.createMediaStreamSource(MT.s); MT.g = { gain: { set value(v: number) { if (MT.s?._gain) MT.s._gain.gain.value = v; } } };
+    const an = MT.ac.createAnalyser(); an.fftSize = 512; src.connect(an);
     const buf = new Uint8Array(an.fftSize);
     mt.on = true; devices();
     const tick = () => { if (!mt.on) return; an.getByteTimeDomainData(buf); let m = 0; for (const x of buf) m = Math.max(m, Math.abs(x - 128)); mt.lvl = Math.min(100, m / 1.28); mt.hot = m > 120; requestAnimationFrame(tick); };
     tick();
-    setTimeout(() => { if (mt.on) stopTest(); }, 30000);
+    clearTimeout(MT.t); MT.t = setTimeout(() => { if (mt.on) stopTest(); }, 30000);
   }
-  function stopTest() { mt.on = false; MT.s?.getTracks().forEach((t: MediaStreamTrack) => t.stop()); try { MT.ac?.close(); } catch {} mt.lvl = 0; }
+  function stopTest() { clearTimeout(MT.t); mt.on = false; closeMic(MT.s); MT.s = null; try { MT.ac?.close(); } catch {} mt.lvl = 0; }
+  $effect(() => () => stopRec());
+
+  // сравнение: 5 с записи — сначала как есть, затем с шумоподавлением (то, что услышат другие)
+  let rec = $state({ st: '' as '' | 'rec' | 'raw' | 'ns', left: 0 });
+  let RC: any = {};
+  function recOf(s: MediaStream): Promise<Blob> {
+    return new Promise(res => {
+      const r = new MediaRecorder(s), parts: Blob[] = [];
+      r.ondataavailable = e => e.data.size && parts.push(e.data);
+      r.onstop = () => res(new Blob(parts, { type: r.mimeType }));
+      r.start(); RC.recs.push(r);
+    });
+  }
+  function play(b: Blob): Promise<void> {
+    return new Promise(res => {
+      const a = new Audio(URL.createObjectURL(b)); RC.a = a; setSink(a);
+      a.onended = a.onerror = () => { URL.revokeObjectURL(a.src); res(); };
+      a.play().catch(() => res());
+    });
+  }
+  async function recTest() {
+    if (rec.st) { stopRec(); return; }
+    if (mt.on) stopTest();
+    try { RC.s = await openMic(); } catch (e: any) { toast('Микрофон: ' + e.message, 'bad'); return; }
+    RC.recs = []; RC.stop = false;
+    const raw: MediaStream | null = RC.s._raw && RC.s._ns ? RC.s._raw : null;
+    const pr = Promise.all([recOf(RC.s), raw ? recOf(raw) : Promise.resolve(null)]);
+    rec.st = 'rec'; rec.left = 5;
+    RC.t = setInterval(() => { rec.left--; if (rec.left <= 0) { clearInterval(RC.t); RC.recs.forEach((r: MediaRecorder) => r.state !== 'inactive' && r.stop()); } }, 1000);
+    const [nsB, rawB] = await pr;
+    closeMic(RC.s); RC.s = null;
+    if (RC.stop) return;
+    if (rawB) { rec.st = 'raw'; await play(rawB); }
+    if (!RC.stop) { rec.st = 'ns'; await play(nsB); }
+    rec.st = '';
+  }
+  function stopRec() {
+    RC.stop = true; clearInterval(RC.t);
+    RC.recs?.forEach((r: MediaRecorder) => r.state !== 'inactive' && r.stop());
+    try { RC.a?.pause(); } catch {}
+    closeMic(RC.s); RC.s = null; rec.st = '';
+  }
+  const recText = $derived(rec.st === 'rec' ? `запись… ${rec.left} с — говорите` : rec.st === 'raw' ? 'играет: как есть, без обработки' : rec.st === 'ns' ? 'играет: с шумоподавлением — так вас слышат' : 'запишет 5 с и проиграет «до» и «после»');
   $effect(() => () => stopTest());
 
   let pttWait = $state(false);
@@ -102,9 +148,14 @@
         {#if !labels}<option disabled>названия появятся после первого доступа к микрофону — «Проверить»</option>{/if}
       </select><span></span></div>
       <div class="setrow"><span>Громкость</span><input type="range" min="0" max="2" step="0.05" value={SET.micGain} oninput={e => { const v = +(e.target as HTMLInputElement).value; setMicGain(v); setSet('micGain', v); if (MT.g) MT.g.gain.value = v; }} /><span class="val">{pct(SET.micGain)}</span></div>
-      <div class="setrow"><span>Проверка</span><div class="lvl2"><i style="width:{mt.lvl}%;background:{mt.hot ? 'var(--red)' : 'var(--green)'}"></i></div><button class="b sm" onclick={micTest}>{mt.on ? 'Стоп' : 'Проверить'}</button></div>
+      <div class="setrow"><span>Проверка</span><div class="lvl2"><i style="width:{mt.lvl}%;background:{mt.hot ? 'var(--red)' : 'var(--green)'}"></i></div><button class="b sm" style="min-width:96px" onclick={micTest}>{mt.on ? 'Стоп' : 'Проверить'}</button></div>
+      <div class="setrow"><span>Шумоподавление</span><select value={nsMode()} onchange={e => { setSet('nsMode', (e.target as HTMLSelectElement).value); remic(); if (mt.on) { stopTest(); micTest(); } }}>
+        {#each NS_MODES as [v, t]}<option value={v}>{t}</option>{/each}
+      </select><span></span></div>
+      <div class="setrow"><span></span><span class="small muted nsline">{NS_MODES.find(x => x[0] === nsMode())?.[2]}</span><span></span></div>
+      <div class="setrow"><span>Сравнить</span><span class="small muted nsline">{recText}</span><button class="b sm" style="min-width:96px" onclick={recTest}>{rec.st ? 'Стоп' : 'Записать 5 с'}</button></div>
       <div class="setrow"><span>Обработка</span><div class="row" style="gap:12px;flex-wrap:wrap">
-        {#each [['ns', 'шумоподавление'], ['ec', 'эхоподавление'], ['agc', 'автоусиление']] as [k, t]}<label class="small"><input type="checkbox" checked={SET[k]} onchange={e => { setSet(k, (e.target as HTMLInputElement).checked); remic(); }} /> {t}</label>{/each}
+        {#each [['ec', 'эхоподавление'], ['agc', 'автоусиление']] as [k, t]}<label class="small"><input type="checkbox" checked={SET[k]} onchange={e => { setSet(k, (e.target as HTMLInputElement).checked); remic(); }} /> {t}</label>{/each}
       </div><span></span></div>
       <div class="setrow"><span>Рация: клавиша</span><span><span class="keycap">{pttWait ? 'нажмите клавишу…' : keyName(SET.pttKey)}</span></span><button class="b sm" onclick={pttSet}>Назначить</button></div>
       <div class="small muted">Изменения применяются сразу, в том числе посреди разговора.</div>

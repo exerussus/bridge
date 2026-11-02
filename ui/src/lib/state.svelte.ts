@@ -119,7 +119,7 @@ export function badgeCount(name: string, v: number) { ui.counts[name] = v; }
 
 // ── настройки этого ПК (хранит мост: bridge-data/ui.json; переживают переустановку и смену окна) ──
 export const SET_DEFAULT: Record<string, any> = {
-  mic: '', out: '', micGain: 1, outVol: 1, ns: true, ec: true, agc: true, sfx: true, sfxVol: 0.6, ping: 'drop', pingVol: 0.7, chatSound: true,
+  mic: '', out: '', micGain: 1, outVol: 1, nsMode: 'rnnoise', ec: true, agc: true, sfx: true, sfxVol: 0.6, ping: 'drop', pingVol: 0.7, chatSound: true,
   pttKey: 'Space', joinSounds: true, joinVol: 0.7,
   shareQ: 'text', shareAudio: true, shareCursor: true, railFold: false, chatFold: false,
   pingEvery: 3, pingDnd: false, pingFlash: true, bBrush: 12, bTxt: { ff: '', fb: false, fi: false, fu: false, fa: '', fs: 22 },
@@ -147,6 +147,9 @@ export async function loadSettings() {
       const emo = localStorage.getItem('bridge-emo'); if (emo) saved.emo = JSON.parse(emo);
     } catch {}
   }
+  // 3.14: галочка «шумоподавление» → режим; включённая становится нейросетью (лёгкой)
+  if (saved && !('nsMode' in saved) && 'ns' in saved) saved.nsMode = saved.ns === false ? 'off' : 'rnnoise';
+  if (saved) delete saved.ns;
   Object.assign(SET, SET_DEFAULT, saved || {});
   setLoaded = true;
   document.documentElement.dataset.theme = SET.theme || 'dark';

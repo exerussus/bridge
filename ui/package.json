@@ -1,7 +1,7 @@
 {
   "name": "bridge-ui",
   "private": true,
-  "version": "3.13.0",
+  "version": "3.14.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -17,6 +17,7 @@
     "vite": "^8.3.5"
   },
   "dependencies": {
+    "@sapphi-red/web-noise-suppressor": "0.4.1",
     "@tauri-apps/api": "^2.12.4",
     "pdfjs-dist": "5.4.296"
   }

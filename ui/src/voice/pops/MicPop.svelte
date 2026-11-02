@@ -3,6 +3,7 @@
   import { remic, setMicGain, micLevel } from '../engine.svelte';
   import { closePop } from '../../lib/pop';
   import { goSettings } from '../../lib/nav';
+  import { NS_MODES, nsMode } from '../denoise';
   let devs = $state<MediaDeviceInfo[]>([]);
   let lvl = $state(0);
   (async () => { try { devs = (await navigator.mediaDevices.enumerateDevices()).filter(x => x.kind === 'audioinput' && x.deviceId !== 'default'); } catch {} })();
@@ -18,6 +19,10 @@
 <div class="plbl">Громкость · <span>{Math.round(SET.micGain * 100)}%</span></div>
 <input type="range" min="0" max="2" step="0.05" value={SET.micGain} style="width:100%" oninput={e => { const v = +(e.target as HTMLInputElement).value; setMicGain(v); setSet('micGain', v); }} />
 <div class="lvl2"><i style="width:{lvl}%"></i></div>
-<label class="ptog"><input type="checkbox" checked={SET.ns} onchange={e => { setSet('ns', (e.target as HTMLInputElement).checked); remic(); }} /><span>Шумоподавление</span></label>
+<div class="psep"></div>
+<div class="plbl">Шумоподавление</div>
+{#each NS_MODES as [v, t, d] (v)}
+  <button class="popt" class:on={nsMode() === v} title={d} onclick={() => { setSet('nsMode', v); remic(); }}><i></i>{t}</button>
+{/each}
 <div class="psep"></div>
 <a href="#settings" onclick={e => { e.preventDefault(); closePop(); goSettings('audio'); }}>Все настройки звука →</a>

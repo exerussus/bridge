@@ -11,6 +11,7 @@ import { TILES } from '../lib/tile.svelte';
 import { sfx, sfxDiff, ring, playFile, pingSound, playPing, PING_KINDS, setSink, setSilent } from '../lib/audio';
 import { notifyTo } from '../lib/notify';
 import { CHT } from '../lib/chat.svelte';
+import { openMic, closeMic } from './denoise';
 
 export const V = $state({ v: 0 });
 export const bump = () => { V.v++; };
@@ -187,20 +188,9 @@ function muteIndicate(by: string) {
 }
 
 // ── микрофон ──
-async function micStream(): Promise<MediaStream> {
-  const dev = SET.mic;
-  const raw = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: dev ? { exact: dev } : undefined, echoCancellation: SET.ec, noiseSuppression: SET.ns, autoGainControl: SET.agc, channelCount: 1 }, video: false });
-  if (Math.abs(SET.micGain - 1) < 0.01) return raw;
-  // громкость микрофона: усилитель WebAudio (исходный поток остаётся у результата — чтобы его выключить)
-  const ac = new AudioContext(), src = ac.createMediaStreamSource(raw), g = ac.createGain(), dst = ac.createMediaStreamDestination();
-  g.gain.value = SET.micGain;
-  src.connect(g).connect(dst);
-  try { await ac.resume(); } catch {}
-  const out: any = dst.stream;
-  out._raw = raw; out._ac = ac; out._gain = g;
-  return out;
-}
-function stopMic(s: any) { if (!s) return; s.getTracks().forEach((t: MediaStreamTrack) => t.stop()); s._raw?.getTracks().forEach((t: MediaStreamTrack) => t.stop()); try { s._ac?.close(); } catch {} }
+// громкость и шумоподавление (нейросеть) — в denoise.ts; исходный поток остаётся у результата — чтобы его выключить
+const micStream = openMic;
+const stopMic = closeMic;
 /** Пересоздать микрофон (сменили устройство или обработку) посреди разговора. */
 export async function remic() {
   if (!R.local) return;

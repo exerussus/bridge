@@ -375,6 +375,7 @@ tr.click:hover td,.fs-row:hover td{background:rgba(var(--tone-rgb),.04)}
 .setrow > span:first-child{color:var(--muted);font-size:13px}
 .setrow select,.setrow input[type=range]{width:100%}
 .setrow .val{min-width:46px;text-align:right;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px}
+.nsline{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;line-height:17px;height:34px}
 .lvl2{height:8px;border-radius:4px;background:var(--line2);overflow:hidden}
 .lvl2 i{display:block;height:100%;width:0;background:var(--green);transition:width .08s}
 .keycap{display:inline-block;min-width:90px;text-align:center;border:1px solid var(--line2);border-radius:8px;padding:6px 10px;font:600 12px var(--mono)}
