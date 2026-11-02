@@ -109,6 +109,8 @@ pub struct AgentConfig {
     pub extra_args: Vec<String>,
     /// Своя общая папка для обмена файлами с исполнителями (id из folders).
     pub exchange: String,
+    /// Файловый канал efc/1 «канал-агента» рядом с мостом: инструменты bridge mcp для агента без сети (VM).
+    pub file_channel: bool,
 }
 
 impl Default for AgentConfig {
@@ -124,6 +126,7 @@ impl Default for AgentConfig {
             max_budget_usd: 0.0,
             extra_args: Vec::new(),
             exchange: String::new(),
+            file_channel: false,
         }
     }
 }

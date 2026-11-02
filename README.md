@@ -101,6 +101,7 @@ Claude на одном ПК (оркестратор) поручает задач
 
 - **Исполнитель** (`agent` в bridge.json или «Агенты» в панели): `mode` — `off` / `auto` (мост сам запускает `claude -p --output-format stream-json --permission-mode auto`, поручение — через stdin, ход — в реальном времени) / `manual` (поручение ждёт сессию Claude на этом ПК: `agent_take` → `agent_progress` → `agent_report`). `allowFrom` — кто может поручать; `workDir`, `claude` (путь к claude.exe, пусто — найти), `permissionMode`, `maxMinutes`, `maxParallel`, `maxBudgetUsd`.
 - **Оркестратор**: инструменты моста для Claude — `bridge mcp` (MCP по stdin/stdout). Подключить: `claude mcp add --scope user bridge -- "C:\Bridge\bridge.exe" mcp --config "C:\Bridge\bridge.json"` (точная строка — в панели, «Агенты» → «Подключить к Claude»). Инструменты: `bridge_peers`, `agent_ask`, `agent_wait`, `agent_status`, `agent_stop`, `agent_threads`, `exchange_folder`, `send_file`; для ручного режима — `agent_wait_task`, `agent_inbox`, `agent_take`, `agent_progress`, `agent_report`.
+- **Агент без сети** (3.12): Claude в виртуальной машине (Cowork и т. п.) получает те же инструменты через файловый канал efc/1 — папку «канал-агента» рядом с мостом (клиент `efc` лежит в ней). Включается в панели: «Агенты» → «канал для агента без сети». Пространства тоже отвечают по efc/1 в своём `_bridge/` (см. API.md).
 - **Обменная папка**: своя общая папка с правом записи у исполнителя (`agent.exchange`, «＋ обмен с …»). Её путь на ПК исполнителя мост передаёт его Claude вместе с поручением.
 - Протокол соседей: `POST /peer/agent/ask`, `POST /peer/agent/events` (ход исполнитель → оркестратор, раз в 0.5 с), `POST /peer/agent/stop`, `GET /peer/agent/thread`; в привете — `agent` (режим для спрашивающего). Нити хранятся в `bridge-data/agent/*.json` у обеих сторон.
 - Локальный API: `GET agent`, `POST agent/settings`, `POST agent/ask {peer,prompt,thread?}` (peer пусто / `local` — поручение этому ПК), `GET agent/thread?id&after`, `GET agent/wait?id&after&timeout`, `POST agent/stop?id`, `POST agent/delete?id`, `GET agent/inbox`, `GET agent/wait-task?timeout`, `POST agent/take?id`, `POST agent/progress`, `POST agent/report`, `POST agent/exchange?peer`. Событие SSE `agent`.
@@ -127,7 +128,7 @@ Claude на одном ПК (оркестратор) поручает задач
 
 ## API для ассистента
 
-Всё, что делает панель, — локальный HTTP `http://127.0.0.1:<порт>/bridge/v1/local/…`, заголовок `X-Bridge-Local: <bridge-data/local.token>` (для потоков можно `?token=`). Перечень с параметрами: `bridge api GET api`. Полное описание записей, действий и файлового интерфейса `_bridge/` — в README 1.4 (раздел 8), оно не менялось.
+Всё, что делает панель, — локальный HTTP `http://127.0.0.1:<порт>/bridge/v1/local/…`, заголовок `X-Bridge-Local: <bridge-data/local.token>` (для потоков можно `?token=`). Перечень с параметрами: `bridge api GET api`. Полное описание записей и действий — в README 1.4 (раздел 8). Файловый интерфейс `_bridge/` с 3.12 — канал efc/1 (раздел «Файловый канал efc/1» в API.md); прежний `outbox/` работает, но устарел.
 
 Новое в 2.0:
 

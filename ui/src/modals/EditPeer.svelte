@@ -32,7 +32,7 @@
 
 <h3>Сосед «{p.title || p.name}»</h3>
 <label class="f">Имя узла — сосед сообщает его сам<input disabled value={p.name + (p.pending ? ' (временное — до первого ответа)' : '')} /></label>
-<label class="f">Псевдоним — для вас (можно менять)<input bind:value={title} placeholder="ПК технолога" /></label>
+<label class="f">Псевдоним — для вас (можно менять)<input bind:value={title} placeholder="Рабочий ноутбук" /></label>
 <div class="row"><label class="f" style="flex:1">Адрес (IP)<input bind:value={ip} placeholder="192.168.1.172 или 26.x.x.x" /></label><label class="f" style="width:110px">Порт<input bind:value={port} /></label></div>
 <label class="f">Ещё адреса, с которых его пускать (через запятую). С 1.4 сосед сообщает свои адреса сам — вписывать нужно только для старых версий<input bind:value={extra} /></label>
 <label class="f">Ключ пары (пусто — не менять; новый — такой же и на том ПК)<input bind:value={secret} placeholder="BRS-…" autocomplete="off" /></label>

@@ -31,6 +31,22 @@ pub struct Builds {
     runs: Mutex<BTreeMap<String, std::process::Child>>,
 }
 
+/// Что запускать: полный путь внутри папки сборки `src` (D:\\Сборки\\Игра\\Game.exe) — в путь от неё (Game.exe).
+/// Раньше полный путь отвергался, и заготовка не сохранялась целиком — программа «слетала» (3.11).
+pub fn exe_in(src: &str, exe: &str) -> Result<String, String> {
+    let e = exe.trim().trim_matches('"').replace('\\', "/");
+    let abs = e.starts_with('/') || e.chars().nth(1) == Some(':');
+    if !abs {
+        return clean_exe(&e);
+    }
+    let base = src.trim().trim_matches('"').replace('\\', "/");
+    let base = base.trim_end_matches('/');
+    if !base.is_empty() && e.len() > base.len() + 1 && e[..base.len()].eq_ignore_ascii_case(base) && e.as_bytes()[base.len()] == b'/' {
+        return clean_exe(&e[base.len() + 1..]);
+    }
+    Err("программа должна лежать в папке сборки".into())
+}
+
 /// Что запускать в сборке: путь внутри папки сборки (без «..» и абсолютных), пусто — ничего.
 pub fn clean_exe(p: &str) -> Result<String, String> {
     let p = p.trim().replace('\\', "/");
@@ -41,7 +57,7 @@ pub fn clean_exe(p: &str) -> Result<String, String> {
     if p.chars().count() > 300 {
         return Err("путь программы — до 300 знаков".into());
     }
-    path::norm(p).ok_or_else(|| "программа — путь внутри папки сборки (например, CORA.exe или bin/Game.exe)".to_string())
+    path::norm(p).ok_or_else(|| "программа — путь внутри папки сборки (например, Game.exe или bin/Game.exe)".to_string())
 }
 
 /// Похожее на запускаемое в папке сборки (для подсказки в заготовке).
@@ -90,6 +106,41 @@ fn history_file(node: &Node) -> PathBuf {
 }
 fn targets_file(node: &Node) -> PathBuf {
     dir(node).join("targets.json")
+}
+/// (3.11) Что запускать у присланных сборок: «сосед/имя» → {exe (как прислал отправитель), own (своё)}.
+fn exes_file(node: &Node) -> PathBuf {
+    dir(node).join("exes.json")
+}
+fn exe_key(peer: &str, name: &str) -> String {
+    format!("{}/{}", peer.to_lowercase(), name)
+}
+/// Запомнить программу, которую указал отправитель (пустую — не затирать прежнюю).
+fn remember_exe(node: &Node, peer: &str, name: &str, exe: &str) {
+    if exe.is_empty() {
+        return;
+    }
+    let f = exes_file(node);
+    let mut t = read(&f);
+    if !t.is_object() {
+        t = json!({});
+    }
+    t[exe_key(peer, name)]["exe"] = json!(exe);
+    write(&f, &t);
+}
+/// Своя программа для запуска присланной сборки (пусто — как у отправителя).
+pub fn set_exe(node: &Node, peer: &str, name: &str, exe: &str) -> Result<String, String> {
+    let name = clean_name(name)?;
+    let target = target_dir(node, peer, &name);
+    let exe = exe_in(&target.display().to_string(), exe)?;
+    let f = exes_file(node);
+    let mut t = read(&f);
+    if !t.is_object() {
+        t = json!({});
+    }
+    t[exe_key(peer, &name)]["own"] = json!(exe);
+    write(&f, &t);
+    node.emit("builds", json!({}));
+    Ok(exe)
 }
 fn presets_file(node: &Node) -> PathBuf {
     dir(node).join("presets.json")
@@ -166,7 +217,7 @@ pub fn set_presets(node: &Node, list: &Value) -> Result<Vec<Value>, String> {
             }
         }
         let mode = if p["mode"] == "clean" { "clean" } else { "patch" };
-        let exe = clean_exe(p["exe"].as_str().unwrap_or("")).map_err(|e| format!("«{}»: {}", name, e))?;
+        let exe = exe_in(&path, p["exe"].as_str().unwrap_or("")).map_err(|e| format!("«{}»: {}", name, e))?;
         let ignore: Vec<String> = lines_of(&p["ignore"]).into_iter().map(|l| l.trim_end().to_string()).collect();
         if ignore.len() > 500 {
             return Err(format!("«{}»: в игноре не больше 500 строк", name));
@@ -269,7 +320,7 @@ pub fn set_target(node: &Node, peer: &str, name: &str, p: &str) -> Result<(), St
     } else {
         let pb = PathBuf::from(p.trim());
         if !pb.is_absolute() {
-            return Err("нужен полный путь, например D:\\Сборки\\CORA".into());
+            return Err("нужен полный путь, например D:\\Сборки\\Игра".into());
         }
         t[key] = json!(p.trim());
     }
@@ -285,6 +336,7 @@ pub fn status(node: &Node) -> Value {
         let k = format!("{}/{}", e["peer"].as_str().unwrap_or(""), e["name"].as_str().unwrap_or(""));
         recv.insert(k, e.clone());
     }
+    let exes = read(&exes_file(node));
     let all_in: Vec<Value> = h.as_array().cloned().unwrap_or_default().into_iter().filter(|e| e["dir"] == "in").collect();
     let mut received: Vec<Value> = recv
         .values()
@@ -296,8 +348,14 @@ pub fn status(node: &Node) -> Value {
             // история версий этой сборки (новые — первыми) и что запускать (из последней удачной)
             let hist: Vec<Value> = all_in.iter().filter(|x| x["peer"] == p && x["name"] == n).rev().take(30).cloned().collect();
             let last_ok = hist.iter().find(|x| x["error"].is_null());
-            let exe = last_ok.and_then(|x| x["exe"].as_str()).unwrap_or("").to_string();
+            // что запускать: своё > последнее указанное отправителем (в истории или запомненное) — не «слетает»
+            let ex = &exes[exe_key(p, n)];
+            let sender = hist.iter().filter_map(|x| x["exe"].as_str()).find(|x| !x.is_empty()).or(ex["exe"].as_str()).unwrap_or("").to_string();
+            let own = ex["own"].as_str().unwrap_or("").to_string();
+            let exe = if own.is_empty() { sender.clone() } else { own.clone() };
             e["exe"] = json!(exe);
+            e["exeSender"] = json!(sender);
+            e["exeOwn"] = json!(own);
             e["exeExists"] = json!(!exe.is_empty() && path::to_local(&target, &exe).map(|f| f.is_file()).unwrap_or(false));
             e["lastOk"] = last_ok.cloned().unwrap_or(Value::Null);
             e["history"] = json!(hist);
@@ -347,7 +405,7 @@ pub fn run(node: &Node, peer: &str, name: &str) -> Result<Value, String> {
     let r = st["received"].as_array().and_then(|a| a.iter().find(|x| eq_ic(x["peer"].as_str().unwrap_or(""), peer) && x["name"] == name.as_str()).cloned()).ok_or("такой сборки здесь нет")?;
     let exe = r["exe"].as_str().unwrap_or("");
     if exe.is_empty() {
-        return Err("отправитель не указал, что запускать".into());
+        return Err("не указано, что запускать: «Что запускать…» у сборки".into());
     }
     let target = target_dir(node, peer, &name);
     let full = path::to_local(&target, exe).map_err(|_| "программа вне папки сборки".to_string())?;
@@ -401,7 +459,7 @@ pub fn send_ex(node: &Arc<Node>, peer: &str, src: &str, name: &str, mode: &str, 
 /// Отправка с программой для запуска (`exe` — путь внутри сборки) и заметкой «что нового» (до 2000 знаков).
 #[allow(clippy::too_many_arguments)]
 pub fn send_full(node: &Arc<Node>, peer: &str, src: &str, name: &str, mode: &str, ignore: &[String], preset: &str, exe: &str, note: &str) -> Result<Value, (u16, String)> {
-    let exe = clean_exe(exe).map_err(|e| (400, e))?;
+    let exe = exe_in(src, exe).map_err(|e| (400, e))?;
     let note: String = note.trim().chars().take(2000).collect();
     let pc = node.cfg.read().peer(peer).cloned().ok_or((404, format!("нет соседа «{}»", peer)))?;
     let name = clean_name(name).map_err(|e| (400, e))?;
@@ -614,6 +672,7 @@ fn install(node: &Arc<Node>, peer: &str, zipf: &Path, name: &str) -> Result<Valu
         files += 1;
     }
     let exe = clean_exe(meta["exe"].as_str().unwrap_or("")).unwrap_or_default();
+    remember_exe(node, peer, &name, &exe);
     let note: String = meta["note"].as_str().unwrap_or("").chars().take(2000).collect();
     Ok(json!({ "dir": "in", "peer": peer, "name": name, "mode": mode, "at": time::format(&time::now()), "files": files, "bytes": bytes, "target": target.display().to_string(), "old": old, "sentAt": meta["at"], "exe": exe, "note": note, "n": meta["n"] }))
 }

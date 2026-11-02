@@ -275,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-app"
-version = "3.9.0"
+version = "3.12.0"
 dependencies = [
  "axum",
  "bridge-core",
@@ -291,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-core"
-version = "3.9.0"
+version = "3.12.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-node"
-version = "3.9.0"
+version = "3.12.0"
 dependencies = [
  "argon2",
  "axum",
@@ -320,6 +320,7 @@ dependencies = [
  "chrono",
  "crc32fast",
  "ed25519-dalek",
+ "efc-core",
  "futures-util",
  "hex",
  "hkdf",
@@ -1016,6 +1017,16 @@ dependencies = [
  "sha2",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "efc-core"
+version = "0.2.1"
+source = "git+https://github.com/exerussus/efc?tag=v0.2.1#d0dffbbf4a4d604e2f0dea67427810c2c810ca37"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

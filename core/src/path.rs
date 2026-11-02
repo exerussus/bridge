@@ -204,6 +204,9 @@ pub fn open_settled(file: &Path) -> std::io::Result<std::fs::File> {
     }
 }
 
+/// sha256 пустого файла.
+pub const EMPTY_SHA: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
 pub fn sha256_file_settled(file: &Path) -> std::io::Result<String> {
     sha256_reader(open_settled(file)?)
 }

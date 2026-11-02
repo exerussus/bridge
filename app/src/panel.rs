@@ -39,6 +39,18 @@ pub fn run(node: Arc<Node>, rt: tokio::runtime::Handle, on_ready: impl FnOnce() 
     let builder = tauri::Builder::default()
         .register_asynchronous_uri_scheme_protocol("bridge", move |_ctx, req, responder| {
             let node = n2.clone();
+            // страница и файлы панели — сразу, без очереди моста: окно не белеет, пока мост занят стартом
+            if req.method() == tauri::http::Method::GET {
+                let path = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
+                if let Some((mime, cache, csp, body)) = bridge_node::http_local::ui_static(&node, &path) {
+                    let mut b = tauri::http::Response::builder().status(200).header("Content-Type", mime).header("Cache-Control", cache);
+                    if let Some(c) = csp {
+                        b = b.header("Content-Security-Policy", c).header("X-Frame-Options", "DENY");
+                    }
+                    responder.respond(b.body(body).unwrap_or_else(|_| text(500, "ответ")));
+                    return;
+                }
+            }
             rt.spawn(async move {
                 responder.respond(dispatch(node, req).await);
             });

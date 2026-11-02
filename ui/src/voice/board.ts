@@ -688,8 +688,8 @@ function down(e) {
   }
   if (layerHiddenWarn()) return;
   if (t === 'pen' || t === 'marker' || t === 'brush') {
-    const w = t === 'brush' ? (2 * (SET.bBrush || 12)) / z : ((SIZES[B.size] || 4) * (t === 'marker' ? 4 : 1)) / Math.max(0.25, Math.min(4, z));
-    const o = { id: newId(), t: 'path', L: B.layer, x: Math.round(p.wx * 10) / 10, y: Math.round(p.wy * 10) / 10, pts: [0, 0], c: B.color, w: Math.round(w * 10) / 10, z: Date.now() + Math.random() };
+    const w = t === 'brush' ? (2 * (SET.bBrush || 12)) / z : ((SIZES[B.size] || 4) * (t === 'marker' ? 4 : 1)) / z; // толщина на экране одна при любом приближении (3.10)
+    const o = { id: newId(), t: 'path', L: B.layer, x: Math.round(p.wx * 10) / 10, y: Math.round(p.wy * 10) / 10, pts: [0, 0], c: B.color, w: Math.round(w * 100) / 100, z: Date.now() + Math.random() };
     if (t === 'marker') o.a = 0.35;
     setObj(o); send({ t: 'put', o }); B.drag = { kind: 'draw', id: o.id, lx: p.wx, ly: p.wy }; return;
   }
@@ -704,7 +704,7 @@ function down(e) {
     setObj(o); B.drag = { kind: 'shape', id: o.id, x0: x, y0: y }; return;
   }
   if (t === 'rect' || t === 'arrow') {
-    const x = snap(p.wx), y = snap(p.wy), sw = (SIZES[B.size] || 4) / Math.max(0.25, Math.min(4, z));
+    const x = snap(p.wx), y = snap(p.wy), sw = Math.round(((SIZES[B.size] || 4) / z) * 100) / 100;
     const o = t === 'rect' ? { id: newId(), t: 'rect', L: B.layer, x, y, w: 0, h: 0, c: B.color, sw, z: Date.now() } : { id: newId(), t: 'arrow', L: B.layer, x, y, x2: x, y2: y, c: B.color, sw, z: Date.now() };
     setObj(o); B.drag = { kind: 'shape', id: o.id, x0: x, y0: y }; return;
   }

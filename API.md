@@ -229,6 +229,7 @@ requests.post(B + "ui", json={"action": "join", "channel": "Семья"}, header
 - `POST update/offer {peers?}` — предложить (без списка — всем на связи) → `{version, results: {сосед: что вышло}}`. Мостам до 2.12 файлы уходят обычной отправкой (в «приём/<вы>/Мост <версия>/») и сообщением в личный чат.
 - `GET update/state` — `{version, status, error, offer: {from, version, files, notes}, restartable}`.
 - `POST update/accept` — скачать у предложившего Мост.exe и bridge.exe, сверить sha256, заменить (старые — в `*.old`, их уберёт следующий запуск) и перезапуститься; `POST update/decline`.
+- `POST update/rejoin` — после перезапуска с обновлением: `{rejoin: {room, title, at}}`, если ПК сидел в канале (до 10 минут, отдаётся один раз), иначе `{rejoin: null}`. Панель по нему тихо возвращается в канал (3.10).
 - Соседи: `POST /peer/update/offer {version, files: [{name, size, sha256}], notes}`, `GET /peer/update/file?name` (только файлы программы).
 
 ## Плитка участника
@@ -262,6 +263,26 @@ requests.post(B + "ui", json={"action": "join", "channel": "Семья"}, header
 - Панель раздаётся самим мостом: `/` и файлы `/app/*` (сборка `ui/dist`, вшита в программу).
 
 `GET overview` (всё для панели одним запросом), `GET status`, `POST sync` (обменяться сейчас), `GET log?lines`, `GET changelog`, `POST open?target=…` (открыть папку в Проводнике).
+
+## Файловый канал efc/1 (3.12) — для программ и агентов без сети
+
+Когда до моста нет сети (Claude в виртуальной машине, песочница), с ним говорят через папку по стандарту efc/1
+(github.com/exerussus/efc): запрос — файл `requests/<id>.json`, итог — `done/<id>.json`, пульс — `alive.json`, паспорт с
+командами — `channel.json`. Клиент `efc` (Linux, статический) мост кладёт в каждый канал. Каналы перечислены в
+`.efc-channels.json` в папке моста: `efc list` оттуда их находит.
+
+- **Пространство** — канал в его `_bridge/` (не синхронизируется: запросы выполняет только этот ПК). Команды — действия
+  записей (`create`, `transition`, `set`, `comment`, `ack`, `attach`, `link`, `unlink`, `revert`, `approve`, `reject`),
+  `params` — поля действия (как у `POST actions`, без `action` и `share`). Итог: `data {record, eid, version}`; ошибка
+  действия — код 1, `reason: action-failed`. Пакеты, шаги с подстановкой `${шаг.version}`, `expect`, отмена — по стандарту.
+  Пример: `./efc --channel <пространство>/_bridge --params '{"record":"<id>","to":"review","note":"готово"}' call transition`.
+  `inbox/<id>.json` — с полями efc `v`, `key`, `since`, `suggest` (готовые запросы-переходы) рядом с прежними `why` и
+  `record`; `status.json` — с `efc {running, error}`. Старый `outbox/` работает, но устарел.
+- **Канал агента** — папка «канал-агента» рядом с мостом: команды = инструменты `bridge mcp` с теми же аргументами в
+  `params` (`bridge_peers`, `agent_ask`, `agent_wait`, `bridge_api`, …), те же правила (управлять ПК нельзя). Ожидание
+  (`wait_seconds`) урезается до срока запроса; долгое — `efc --no-wait call …`, затем `efc wait <id>`. Выключен по
+  умолчанию: `POST agent/settings {fileChannel: true}` или панель «Агенты» → «канал для агента без сети»; состояние —
+  `GET agent` → `fileChannel {on, path, running, error}`.
 
 ## Инструменты для Claude (MCP)
 
@@ -485,7 +506,12 @@ Unity — пакет `sdk/unity/com.exerussus.most` (см. его README).
 - (3.8) В заготовке — `exe`: что запускать у получателя (путь внутри сборки, без «..»). `POST builds/send {preset, mode?, note?}` — `note` — «что нового» (до 2000 знаков). В архиве `_most-build.json` теперь есть `exe`, `note` и `n` — номер версии этой сборки для этого соседа. `builds/preview` отдаёт `exes` — подсказки, что запускать.
 - (3.8) У получателя: `GET builds` → `received: [{peer, name, n, note, at, mode, files, bytes, target, exe, exeExists, running, lastOk, history: [..новые первыми]}]`. `POST builds/run {peer, name}` — запустить указанную отправителем программу (только с этого ПК; пока ПК управляют по сети и с телефона — нельзя), `POST builds/stop {peer, name}`.
 - (3.3.5) Заготовки: `GET builds/presets` → `{list}`, `POST builds/presets {list: [{id, name, path, peers: [..], mode, ignore: [строки]}]}` (до 50; `id` — латиница, цифры, - и _; `ignore` — шаблоны как в .gitignore, `!шаблон` возвращает исключённое, до 500 строк). `POST builds/preview {path, ignore} | {preset}` → `{files, bytes, ignoredFiles, ignoredBytes, rules: [{rule, files, bytes, example}], biggest}`. `POST builds/send {preset, mode?}` — по заготовке всем её получателям → `{started: [..], errors}`; разовая отправка принимает и `ignore`. В истории — `preset`, `skipped`.
-- `POST builds/target {peer, name, path}` — куда распаковывать сборку от соседа (пусто — `сборки/<name>`). `POST open?target=build&peer&name` — открыть папку сборки.
+- `POST builds/target {peer, name, path}` — куда распаковывать сборку от соседа (пусто — `сборки/<name>`).
+- `POST builds/exe {peer, name, exe}` (3.11) — своя программа для запуска присланной сборки: путь внутри папки сборки или полный путь к файлу в ней; пусто — как указал отправитель. В `GET builds` у присланной: `exe` (что запустится), `exeSender`, `exeOwn`. Программа отправителя запоминается: версия без неё её не сбрасывает. В заготовке (`builds/presets`) `exe` тоже можно дать полным путём внутри папки сборки. `POST open?target=build&peer&name` — открыть папку сборки.
 - `GET mounts/plan?peer&id` → `{items: [{path, act: download|update|delete_here|upload|delete_owner|restore|conflict, size, local, remote}], total, down, up, speedDown, speedUp, etaDown, etaUp (с; -1 — неизвестно), localFiles, remoteFiles, transfers, failed}` — что сделает обмен с папкой соседа.
+- `GET mounts/plan?peer&id&force=push|take` (3.11) — что сделает жёсткая сверка (sha всех файлов пересчитываются заново).
+- `POST mounts/force {peer, id, mode: push|take}` (3.11) — жёсткая сверка при ближайшем обмене: `push` — главная копия этого ПК (у хозяина станет как здесь; нужен доступ «запись»), `take` — главная копия хозяина (здесь станет как у него). Отличия другой стороны — в корзину. С телефона недоступно.
+- `POST folders/force {id}` (3.11) — своя папка: «главная — моя». Метка уходит соседям в `force` у папки; каждый при следующем обмене делает у себя `take`. С телефона недоступно.
+- Передача пачкой (3.11): соседи сами шлют мелкие файлы (до 16 МБ, до 1000 штук и 256 МБ за раз) архивом: `POST /peer/folders/:id/pack {paths}`, `PUT /peer/folders/:id/pack?sha&size` → `{results: [{path, code, message}]}`, `POST /peer/shares/:share/pack {paths}`, `POST /peer/mailbox/pack {paths}`. В архиве — файлы под номерами и `most-pack.json` `[{i, path, sha256, size, base}]`; получатель сверяет sha каждого. Сосед старой версии (404) — по одному файлу, как раньше.
 - (3.3.2) Заготовки: `GET tile/status/presets` → `{list: [{id, text, color, img}], active}`, `POST tile/status/presets {list: [{id, text, color, silent?}]}` (`silent` — полная тишина, пока выбрана; видно соседям как `stSilent` в стиле плитки, на этом ПК — `silent` в `GET avatars`) (до 20; id — латиница, цифры, -), `POST tile/status/apply {id}` (пусто — без статуса; текст, цвет и значок уходят в плитку), `GET|POST tile/status/preset/image?id` (до 256 КБ), `POST tile/status/preset/image/remove?id`.
 - `POST tile/status {text?, color?}` — статус (текст до 255 знаков, цвет `#rrggbb`; пусто — убрать). `GET|POST tile/status/image[?peer]` — значок (до 256 КБ), `POST tile/status/image/remove`. Статус — в стиле плитки (`stText`, `stColor`), значок — `stImg` в `GET tile`.

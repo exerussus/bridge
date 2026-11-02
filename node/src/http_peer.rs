@@ -14,7 +14,7 @@ use bridge_core::proto::*;
 use bridge_core::{eq_ic, path, signing, time, API_PREFIX, AUTH_SCHEME, LOCAL_TOKEN_HEADER};
 use futures_util::StreamExt;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -182,7 +182,7 @@ async fn peer_gate(node: Arc<Node>, ip: Option<IpAddr>, req: Request, next: Next
     let pq = req.uri().path_and_query().map(|x| x.as_str().to_string()).unwrap_or_default();
     let path_str = req.uri().path().to_string();
     let query: HashMap<String, String> = req.uri().query().map(parse_query).unwrap_or_default();
-    let stream = method == axum::http::Method::PUT && path_str.starts_with(&format!("{}/peer/folders/", API_PREFIX)) && path_str.ends_with("/file");
+    let stream = method == axum::http::Method::PUT && path_str.starts_with(&format!("{}/peer/folders/", API_PREFIX)) && (path_str.ends_with("/file") || path_str.ends_with("/pack"));
     let ip_known = peer.allows_ip(ip) || (is_loopback(ip) && peer.ips.iter().any(|x| x == "127.0.0.1"));
     let (parts, body) = req.into_parts();
     let mut bytes = Bytes::new();
@@ -365,6 +365,7 @@ pub fn router(node: Arc<Node>) -> Router {
         .route(&format!("{}/peer/hello", p), get(hello))
         .route(&format!("{}/peer/shares/:share/manifest", p), get(share_manifest))
         .route(&format!("{}/peer/shares/:share/file", p), get(share_file))
+        .route(&format!("{}/peer/shares/:share/pack", p), post(share_pack_get))
         .route(&format!("{}/peer/shares/:share/events", p), get(share_events))
         .route(&format!("{}/peer/notify", p), post(notify))
         .route(&format!("{}/peer/mailbox", p), get(mailbox_list))
@@ -374,6 +375,8 @@ pub fn router(node: Arc<Node>) -> Router {
         .route(&format!("{}/peer/folders/:id/manifest", p), get(folder_manifest))
         .route(&format!("{}/peer/folders/:id/file", p), get(folder_file).put(folder_put))
         .route(&format!("{}/peer/folders/:id/delete", p), post(folder_delete))
+        .route(&format!("{}/peer/folders/:id/pack", p), post(folder_pack_get).put(folder_pack_put))
+        .route(&format!("{}/peer/mailbox/pack", p), post(mailbox_pack_get))
         .route(&format!("{}/peer/signal", p), post(signal))
         .route(&format!("{}/peer/agent/ask", p), post(agent_ask))
         .route(&format!("{}/peer/agent/events", p), post(agent_events))
@@ -543,6 +546,24 @@ async fn share_file(State(node): St, AxPath(share): AxPath<String>, Query(q): Qu
     send_file(&node, &pc.name, "пространство", &entry.path, full, entry.sha256).await
 }
 
+/// (3.11) POST shares/:share/pack {paths} — файлы пространства одним архивом.
+async fn share_pack_get(State(node): St, AxPath(share): AxPath<String>, req: Request) -> Response {
+    let pc = ctx(&req);
+    let Some(rt) = shared(&node, &share, &pc.name) else { return err(404, "нет такого пространства для этого соседа") };
+    let ig = node.cfg.read().global_ignore();
+    let items: Vec<crate::pack::Item> = {
+        let files = rt.files.lock();
+        pack_paths(&pc.body)
+            .into_iter()
+            .filter(|p| !ig.is_ignored(p))
+            .filter_map(|p| files.find(&p).cloned())
+            .filter(|e| e.size <= crate::pack::MAX_ITEM)
+            .filter_map(|e| Some(crate::pack::Item { full: path::to_local(&rt.root, &e.path).ok()?, path: e.path, base: String::new() }))
+            .collect()
+    };
+    serve_pack(&node, &pc.name, "пространство", items).await
+}
+
 #[derive(Deserialize)]
 struct EventsQ {
     after: Option<String>,
@@ -610,6 +631,169 @@ async fn mailbox_file(State(node): St, Query(q): Query<PathQ>, req: Request) -> 
     let item = node.mailbox.pending(&node, &peer).into_iter().find(|(e, _)| eq_ic(&e.path, &p));
     let Some((e, full)) = item else { return err(404, "нет файла") };
     send_file(&node, &pc.name, "отправка", &e.path, full, e.sha256).await
+}
+
+// ───────────── передача пачкой (3.11) ─────────────
+
+fn pack_paths(body: &[u8]) -> Vec<String> {
+    let v: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+    v["paths"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().and_then(path::norm)).take(crate::pack::MAX_FILES).collect()).unwrap_or_default()
+}
+
+/// Собрать архив из файлов и отдать его; временный архив удаляется после отправки.
+async fn serve_pack(node: &Arc<Node>, peer: &str, what: &str, items: Vec<crate::pack::Item>) -> Response {
+    if items.is_empty() {
+        return err(404, "нет файлов");
+    }
+    let tmp = node.tmp_file();
+    let t2 = tmp.clone();
+    let n = items.len();
+    let built = tokio::task::spawn_blocking(move || crate::pack::build(&items, &t2)).await;
+    let guard = crate::pack::TmpGuard(tmp.clone());
+    match built {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => return err(500, format!("архив: {}", e)),
+        Err(e) => return err(500, e.to_string()),
+    }
+    let sha = match path::sha256_file(&tmp) {
+        Ok(s) => s,
+        Err(e) => return err(500, e.to_string()),
+    };
+    let f = match tokio::fs::File::open(&tmp).await {
+        Ok(f) => f,
+        Err(e) => return err(500, e.to_string()),
+    };
+    let len = f.metadata().await.map(|m| m.len()).unwrap_or(0);
+    let tr = node.transfers.start("serve", peer, what, &format!("{} файлов архивом", n), len as i64);
+    let lim = node.limits.clone();
+    // guard в замыкании: поток (и файл) закроется раньше, чем архив удалится
+    let stream = tokio_util::io::ReaderStream::with_capacity(f, 64 * 1024).then(move |c| {
+        let _keep = &guard;
+        let n = c.as_ref().map(|b| b.len()).unwrap_or(0);
+        tr.add(n);
+        let lim = lim.clone();
+        async move {
+            lim.up.take(n).await;
+            c
+        }
+    });
+    let mut r = Response::new(Body::from_stream(stream));
+    let h = r.headers_mut();
+    h.insert("Content-Type", HeaderValue::from_static("application/zip"));
+    h.insert("Content-Length", HeaderValue::from(len));
+    if let Ok(v) = HeaderValue::from_str(&sha) {
+        h.insert("X-Sha256", v);
+    }
+    r
+}
+
+/// POST folders/:id/pack {paths} — файлы своей общей папки одним архивом (только те, что соседу видны).
+async fn folder_pack_get(State(node): St, AxPath(id): AxPath<String>, req: Request) -> Response {
+    let pc = ctx(&req);
+    let want: HashSet<String> = pack_paths(&pc.body).into_iter().map(|p| p.to_lowercase()).collect();
+    let cfg = node.cfg.read().clone();
+    let Some(f) = cfg.folder(&id).cloned() else { return err(404, "нет такой папки") };
+    if cfg.access_of(&f, &pc.name).is_none() {
+        return err(404, "нет такой папки");
+    }
+    let root = node.folders.own_root(&node, &f);
+    let items: Vec<crate::pack::Item> = node
+        .folders
+        .own_files(&node, &f)
+        .into_iter()
+        .filter(|e| want.contains(&e.path.to_lowercase()) && e.size <= crate::pack::MAX_ITEM)
+        .filter_map(|e| Some(crate::pack::Item { full: path::to_local(&root, &e.path).ok()?, path: e.path, base: String::new() }))
+        .collect();
+    serve_pack(&node, &pc.name, "папка", items).await
+}
+
+/// PUT folders/:id/pack?sha — правки соседа одним архивом: каждый файл — как отдельная запись (base, конфликт, корзина).
+async fn folder_pack_put(State(node): St, AxPath(id): AxPath<String>, Query(q): Query<HashMap<String, String>>, req: Request) -> Response {
+    let pc = ctx(&req);
+    let sha = q.get("sha").cloned().unwrap_or_default().to_lowercase();
+    let max = crate::pack::MAX_BYTES + 16 * 1024 * 1024;
+    if q.get("size").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0) > max {
+        return err(413, "архив больше предела");
+    }
+    {
+        let cfg = node.cfg.read();
+        let Some(f) = cfg.folder(&id) else { return err(404, "нет такой папки") };
+        match cfg.access_of(f, &pc.name) {
+            None => return err(404, "нет такой папки"),
+            Some(a) if a != bridge_core::config::WRITE => return err(403, "только чтение"),
+            _ => {}
+        }
+    }
+    let tmp = node.tmp_file();
+    let _g = crate::pack::TmpGuard(tmp.clone());
+    let mut file = match tokio::fs::File::create(&tmp).await {
+        Ok(f) => f,
+        Err(e) => return err(500, e.to_string()),
+    };
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+    let mut total: i64 = 0;
+    let guard = node.transfers.start("recv", &pc.name, "папка", "архив правок", q.get("size").and_then(|s| s.parse().ok()).unwrap_or(0));
+    let mut stream = req.into_body().into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else { return err(400, "передача оборвалась") };
+        guard.add(chunk.len());
+        node.limits.down.take(chunk.len()).await;
+        total += chunk.len() as i64;
+        if total > max {
+            return err(413, "архив больше предела");
+        }
+        sha2::Digest::update(&mut hasher, &chunk);
+        if file.write_all(&chunk).await.is_err() {
+            return err(500, "не удалось записать");
+        }
+    }
+    let _ = file.flush().await;
+    drop(file);
+    if hex::encode(sha2::Digest::finalize(hasher)) != sha {
+        return err(422, "архив повреждён при передаче");
+    }
+    let n2 = node.clone();
+    let t2 = tmp.clone();
+    let max_item = node.max_file_bytes().min(crate::pack::MAX_ITEM);
+    let got = match tokio::task::spawn_blocking(move || crate::pack::extract(&t2, &|_| true, &|| n2.tmp_file(), max_item)).await {
+        Ok(Ok(g)) => g,
+        Ok(Err(e)) => return err(400, e),
+        Err(e) => return err(500, e.to_string()),
+    };
+    let mut results = Vec::new();
+    let mut wrote = false;
+    let meta_paths: Vec<(String, crate::pack::Got)> = got.into_iter().collect();
+    for (_, g) in meta_paths {
+        // путь — из most-pack.json; own_write сам проверит игнор, путь и base
+        let p = g.path.clone();
+        let (code, msg) = node.folders.own_write_ex(&node, &id, &pc.name, &p, &g.base, &g.sha, &g.tmp, false).await;
+        wrote |= code == 200;
+        let _ = std::fs::remove_file(&g.tmp);
+        results.push(serde_json::json!({ "path": p, "code": code, "message": msg }));
+    }
+    if wrote {
+        node.folders.notify_folder_changed(&node, Some(&pc.name));
+    }
+    node.info(&format!("[общие] {} прислал архивом {} файл(ов)", pc.name, results.len()));
+    ok_json(&serde_json::json!({ "ok": true, "results": results }))
+}
+
+/// POST mailbox/pack {paths} — что ждёт этого соседа в «Отправке», одним архивом.
+async fn mailbox_pack_get(State(node): St, req: Request) -> Response {
+    let pc = ctx(&req);
+    if !node.cfg.read().mailbox.enabled {
+        return err(404, "ручная отправка выключена");
+    }
+    let Some(peer) = node.cfg.read().peer(&pc.name).cloned() else { return err(404, "нет соседа") };
+    let want: HashSet<String> = pack_paths(&pc.body).into_iter().map(|p| p.to_lowercase()).collect();
+    let items: Vec<crate::pack::Item> = node
+        .mailbox
+        .pending(&node, &peer)
+        .into_iter()
+        .filter(|(e, _)| want.contains(&e.path.to_lowercase()) && e.size <= crate::pack::MAX_ITEM)
+        .map(|(e, full)| crate::pack::Item { path: e.path, full, base: String::new() })
+        .collect();
+    serve_pack(&node, &pc.name, "отправка", items).await
 }
 
 async fn mailbox_ack(State(node): St, req: Request) -> Response {

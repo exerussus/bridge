@@ -274,6 +274,7 @@ pub async fn accept(node: &Arc<Node>) -> Result<(), String> {
     let hook = node.updates.restart_hook.lock().clone();
     match hook {
         Some(h) => {
+            save_rejoin(node);
             node.updates.set(node, "restart", "");
             tokio::time::sleep(std::time::Duration::from_millis(600)).await; // панель успеет показать «перезапускаюсь»
             h();
@@ -281,4 +282,39 @@ pub async fn accept(node: &Arc<Node>) -> Result<(), String> {
         None => node.updates.set(node, "done", "установлено — перезапустите мост"),
     }
     Ok(())
+}
+
+// ───────────── возврат в канал после обновления (3.10) ─────────────
+
+fn rejoin_file(node: &Node) -> std::path::PathBuf {
+    node.data_dir.join("rejoin.json")
+}
+
+/// Перед перезапуском: если ПК сидел в канале — запомнить, куда вернуться.
+pub fn save_rejoin(node: &Node) {
+    let ch = crate::net::channel(node);
+    if ch.room.is_empty() {
+        return;
+    }
+    let v = json!({ "room": ch.room, "title": ch.title, "at": chrono::Utc::now().timestamp() });
+    let _ = std::fs::write(rejoin_file(node), v.to_string());
+}
+
+fn read_rejoin(node: &Node) -> Option<Value> {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(rejoin_file(node)).ok()?).ok()?;
+    let age = chrono::Utc::now().timestamp() - v["at"].as_i64().unwrap_or(0);
+    // вернуться можно в течение 10 минут после перезапуска
+    (v["room"].as_str().map(|r| !r.is_empty()).unwrap_or(false) && (0..600).contains(&age)).then_some(v)
+}
+
+/// Есть куда вернуться: окно приложения после обновления откроется, даже если запуск «к часам».
+pub fn rejoin_pending(node: &Node) -> bool {
+    read_rejoin(node).is_some()
+}
+
+/// Панель забирает канал для возврата (один раз).
+pub fn take_rejoin(node: &Node) -> Option<Value> {
+    let v = read_rejoin(node);
+    let _ = std::fs::remove_file(rejoin_file(node));
+    v
 }

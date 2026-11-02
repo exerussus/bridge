@@ -12,7 +12,7 @@ use bridge_core::time::{self, Time};
 use bridge_core::{eq_ic, to_json};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
@@ -49,6 +49,8 @@ pub struct ShareRt {
     pub outbox_lock: Mutex<()>,
     /// Сосед → отпечаток его файлов, с которым всё забрано: не изменился — список файлов не запрашивается.
     pub pulled_rev: Mutex<BTreeMap<String, String>>,
+    /// (3.11) Соседи без передачи пачкой (старая версия).
+    pub no_pack: Mutex<HashSet<String>>,
 }
 
 fn schema_signature(root: &std::path::Path) -> String {
@@ -109,6 +111,7 @@ impl ShareRt {
             notified_seq: AtomicI64::new(own_seq),
             outbox_lock: Mutex::new(()),
             pulled_rev: Mutex::new(BTreeMap::new()),
+            no_pack: Mutex::new(HashSet::new()),
         }
     }
 
@@ -328,6 +331,46 @@ async fn exchange(node: &Arc<Node>, rt: &Arc<ShareRt>, peer: &PeerConfig, client
     let max = node.max_file_bytes();
     let (mut downloaded, mut conflicts, mut errors) = (0, 0, 0);
     let node_name = node.node_name();
+    // (3.11) мелкие файлы — одним архивом заранее; старый сосед (404) — по одному, как раньше
+    let mut packed: HashMap<String, crate::pack::Got> = HashMap::new();
+    {
+        let want: Vec<&FileEntry> = remote
+            .files
+            .iter()
+            .filter(|r| r.size <= crate::pack::MAX_ITEM && r.size <= max)
+            .filter(|r| matches!(rt.files.lock().decide(r, &peer.name, &cfg, &ig).0, Decision::Download { .. }))
+            .collect();
+        if want.len() >= 2 && !rt.no_pack.lock().contains(&peer.name.to_lowercase()) {
+            for chunk in want.chunks(crate::pack::MAX_FILES) {
+                let w: HashMap<String, String> = chunk.iter().map(|f| (f.path.to_lowercase(), f.sha256.to_lowercase())).collect();
+                let paths: Vec<String> = chunk.iter().map(|f| f.path.clone()).collect();
+                let bytes: i64 = chunk.iter().map(|f| f.size).sum();
+                let zip = node.tmp_file();
+                let _g = crate::pack::TmpGuard(zip.clone());
+                match client.share_pack_get(&rt.id, &paths, &zip, bytes + bytes / 8 + 16 * 1024 * 1024, &format!("{} файлов архивом", paths.len())).await {
+                    Ok(_) => {
+                        let (n2, z2, w2) = (node.clone(), zip.clone(), w.clone());
+                        if let Ok(Ok(got)) = tokio::task::spawn_blocking(move || crate::pack::extract(&z2, &|p| w2.contains_key(&p.to_lowercase()), &|| n2.tmp_file(), crate::pack::MAX_ITEM)).await {
+                            node.info(&format!("[{}] {}: получено архивом: {}", rt.id, peer.name, got.len()));
+                            for (k, g) in got {
+                                if w.get(&k).map(|s| s.eq_ignore_ascii_case(&g.sha)).unwrap_or(false) {
+                                    packed.insert(k, g);
+                                } else {
+                                    let _ = std::fs::remove_file(&g.tmp);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if matches!(e.status(), Some(404) | Some(405)) {
+                            rt.no_pack.lock().insert(peer.name.to_lowercase());
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
     for r in &remote.files {
         let (decision, p) = rt.files.lock().decide(r, &peer.name, &cfg, &ig);
         let Some(p) = p else { continue };
@@ -337,8 +380,13 @@ async fn exchange(node: &Arc<Node>, rt: &Arc<ShareRt>, peer: &PeerConfig, client
             Decision::Same => rt.files.lock().mark(&peer.name, &p, &r.sha256, true),
             Decision::Seen => rt.files.lock().mark(&peer.name, &p, &r.sha256, false),
             Decision::Download { local_changed } => {
-                let tmp = node.tmp_file();
-                match client.download(&rt.id, &p, &tmp, max).await {
+                let pre = packed.remove(&r.path.to_lowercase());
+                let tmp = pre.as_ref().map(|g| g.tmp.clone()).unwrap_or_else(|| node.tmp_file());
+                let got = match pre {
+                    Some(g) => Ok(g.sha),
+                    None => client.download(&rt.id, &p, &tmp, max).await,
+                };
+                match got {
                     Ok(got) if got == r.sha256 => {
                         let res = rt.files.lock().install(&node_name, &peer.name, &p, &tmp, r, local_changed);
                         match res {
@@ -377,6 +425,9 @@ async fn exchange(node: &Arc<Node>, rt: &Arc<ShareRt>, peer: &PeerConfig, client
                 }
             }
         }
+    }
+    for (_, g) in packed {
+        let _ = std::fs::remove_file(&g.tmp);
     }
     if downloaded > 0 || conflicts > 0 {
         rt.schemas();

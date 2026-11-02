@@ -68,6 +68,16 @@
     try { await api('POST', 'agent/settings', body); dirty = false; toast('Сохранено', 'ok'); (document.activeElement as HTMLElement)?.blur(); refresh(); } catch (e: any) { toast(e.message, 'bad'); }
   }
   async function exchange(p: string) { try { await api('POST', 'agent/exchange?peer=' + encodeURIComponent(p)); toast('Обменная папка открыта для ' + titleOf(p), 'ok'); refresh(); } catch (e: any) { toast(e.message, 'bad'); } }
+  // канал для агента без сети (VM): файловый канал efc/1 с теми же инструментами, что bridge mcp
+  async function fileChannel(on: boolean) {
+    try { await api('POST', 'agent/settings', { fileChannel: on }); toast(on ? 'Канал для агента включён' : 'Канал для агента выключен', 'ok'); setTimeout(refresh, 600); } catch (e: any) { toast(e.message, 'bad'); refresh(); }
+  }
+  function fcState(fc: any): [string, string] {
+    if (!fc || !fc.on) return ['выключен', 'muted'];
+    if (fc.running) return ['работает: ' + fc.path, 'ok'];
+    if (fc.error) return ['не открыт: ' + fc.error, 'bad'];
+    return ['открывается…', 'muted'];
+  }
   async function copyText(t: string) { try { await navigator.clipboard.writeText(t); toast('Скопировано', 'ok'); } catch { toast('Не удалось скопировать — выделите вручную', 'bad'); } }
   const pill = (st: string) => AGST[st] || [st, ''];
   const lines = (x: string) => String(x || '').split('\n');
@@ -77,7 +87,7 @@
   <div>
     <div class="card"><h3>Поручить</h3>
       <label class="f">Кому<select bind:value={peer}>{#each can as p (p.name)}<option value={p.name}>{(p.local ? 'Этот ПК' : p.title || p.name) + (p.online ? '' : ' (нет связи)') + ' — ' + (p.agent === 'auto' ? 'Claude запустится сам' : 'ждёт сессию Claude')}</option>{/each}</select></label>
-      <label class="f">Что сделать<textarea bind:value={prompt} rows="5" placeholder="Например: прогони тесты базиса на стенде, положи лог и скриншоты падений в обменную папку, итогом — список упавших."></textarea></label>
+      <label class="f">Что сделать<textarea bind:value={prompt} rows="5" placeholder="Например: прогони тесты на стенде, положи лог и скриншоты падений в обменную папку, итогом — список упавших."></textarea></label>
       <div class="row"><button class="b pri" disabled={!can.length} onclick={ask}>Поручить</button><span class="small muted">{AG && !can.length ? 'Ни один сосед не принимает поручения от этого ПК: на его панели «Агенты» → режим и «кто может поручать».' : ''}</span></div>
     </div>
     <div class="card" id="agThreads" style="margin-top:14px"><h3>Нити</h3>
@@ -165,8 +175,18 @@
             {#if AG.exchange}<span class="small">«{AG.exchange.id}»: <span class="mono">{AG.exchange.path}</span> — доступ: {Object.keys(AG.exchange.access).map(titleOf).join(', ') || 'ни у кого'}</span>{:else}<span class="small muted">не настроена</span>{/if}
             {#each AG.peers.filter((p: any) => !AG.exchange || !AG.exchange.access[p.name]) as p (p.name)}<button class="b sm" onclick={() => exchange(p.name)}>＋ обмен с {p.title || p.name}</button>{/each}
           </div>
+          <div class="small" style="margin-top:14px"><b>Агент без сети</b> — Claude в виртуальной машине (Cowork и т. п.) не достаёт до моста по сети. Файловый канал даёт ему те же инструменты через папку «канал-агента» рядом с мостом; управлять ПК он так же не может.</div>
+          <div class="row" style="margin-top:6px;gap:10px;align-items:center;flex-wrap:nowrap">
+            <label class="chip" style="flex:none"><input type="checkbox" checked={!!AG.fileChannel?.on} onchange={(e) => fileChannel((e.currentTarget as HTMLInputElement).checked)} /> канал для агента без сети</label>
+            {#each [fcState(AG.fileChannel)] as [t, c]}<span class="small fcline" style={c === 'ok' ? 'color:var(--ok)' : c === 'bad' ? 'color:var(--bad)' : ''} class:muted={c === 'muted'} title={t}>{t}</span>{/each}
+          </div>
+          <div class="small muted" style="margin-top:4px">Агенту: подключить папку моста и вызывать <code>./efc --channel канал-агента call bridge_peers</code> (клиент <code>efc</code> лежит в папке канала).</div>
         </div>
       </div>
     {/if}
   </div>
 </div>
+
+<style>
+  .fcline { flex: 1; min-width: 0; height: 1.4em; line-height: 1.4em; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+</style>

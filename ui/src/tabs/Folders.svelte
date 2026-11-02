@@ -45,6 +45,23 @@
     if (!confirm('Удалить эти файлы и у хозяина папки? Они попадут в его корзину.')) return;
     try { await api('POST', 'mounts/allow-deletes?' + new URLSearchParams({ peer: m.peer, id: m.id })); toast('Разрешено — удаление уйдёт при следующем обмене', 'ok'); refresh(); } catch (e: any) { toast(e.message, 'bad'); }
   }
+  // (3.11) жёсткая сверка: чья копия главная — по ней выровнять другую сторону
+  async function forceMount(m: any, mode: 'push' | 'take') {
+    let pl: any = null;
+    try { pl = await api('GET', 'mounts/plan?' + new URLSearchParams({ peer: m.peer, id: m.id, force: mode })); } catch (e: any) { toast(e.message, 'bad'); return; }
+    const n = (a: string) => (pl.items || []).filter((x: any) => x.act === a).length;
+    const who = peerTitle(m.peer);
+    const text = mode === 'push'
+      ? 'Главная — копия этого ПК. У ' + who + ' папка станет как здесь:\n• отправится: ' + n('upload') + ' (' + size(pl.up || 0) + ')\n• удалится у хозяина: ' + n('delete_owner') + '\nЕго прежние версии и удалённое — в корзине у него.'
+      : 'Главная — копия ' + who + '. Здесь папка станет как у него:\n• скачается: ' + (n('download') + n('update')) + ' (' + size(pl.down || 0) + ')\n• уберётся отсюда: ' + n('delete_here') + '\nВаши прежние версии — в корзине моста (внизу вкладки).';
+    if (!pl.total) { toast('Уже совпадает — нечего выравнивать', 'ok'); return; }
+    if (!confirm(text + '\n\nВыполнить?')) return;
+    try { await api('POST', 'mounts/force', { peer: m.peer, id: m.id, mode }); toast('Жёсткая сверка запущена', 'ok'); setTimeout(refresh, 2500); if (fsCur && fsCur.kind === 'mount') setTimeout(loadPlan, 3000); } catch (e: any) { toast(e.message, 'bad'); }
+  }
+  async function forceOwn(f: any) {
+    if (!confirm('Главная — копия этого ПК для папки «' + (f.title || f.id) + '».\nВсе соседи при следующем обмене сделают её у себя точно такой же: их несовпадающие правки и лишние файлы уйдут в корзину у них.\n\nВыполнить?')) return;
+    try { const r = await api('POST', 'folders/force', { id: f.id }); toast('Соседи возьмут эту версию (' + r.files + ' файлов)', 'ok'); } catch (e: any) { toast(e.message, 'bad'); }
+  }
   async function saveCfg() {
     const q = new URLSearchParams({ trashMinutes: cfg.trashMin, upMbit: cfg.up, downMbit: cfg.down, maxFileMb: cfg.max });
     try { await api('POST', 'folders/settings?' + q); toast('Сохранено', 'ok'); cfgTouched = false; refresh(); } catch (e: any) { toast(e.message, 'bad'); }
@@ -191,6 +208,7 @@
           <button class="b sm pri" onclick={() => fsShow('own', '', f.id)}>Файлы</button>
           <button class="b sm" data-open="folder" data-id={f.id}><Gi n="folder" /></button>
           <button class="b sm" title="игнор этой папки" onclick={() => editIgnore('folder', '', f.id)}><Gi n="block" />{f.ignore && f.ignore.length ? ' ' + f.ignore.length : ''}</button>
+          <button class="b sm" title="Жёсткая сверка: у всех соседей папка станет точно как здесь" onclick={() => forceOwn(f)}>⇪ Главная — моя</button>
           <button class="b sm" onclick={() => openModal(FolderEdit, { id: f.id, fd: FD, onsaved: refresh })}>Изменить</button>
           <button class="b sm danger" title="закрыть доступ (файлы останутся)" onclick={() => removeFolder(f.id)}>✖</button></div>
         <div class="small muted mono" style="margin:4px 0">{f.root}</div>
@@ -212,6 +230,8 @@
         <div class="row"><b><Gi n="folder" /> {m.title || m.id}</b><span class="small muted">у {peerTitle(m.peer)}</span><span class="chip" class:w={m.access === 'write'}>{ACCESS[m.access]}</span><span class="pill {st[0]}" title={st[2]}>{st[1]}</span><div class="grow"></div>
           <button class="b sm pri" onclick={() => fsShow('mount', m.peer, m.id)}>Файлы</button>
           <button class="b sm" title="игнор этой папки" onclick={() => editIgnore('mount', m.peer, m.id)}><Gi n="block" />{m.ignore.length + m.ownerIgnore.length ? ' ' + (m.ignore.length + m.ownerIgnore.length) : ''}</button>
+          {#if m.access === 'write'}<button class="b sm" title="Жёсткая сверка: у хозяина папка станет точно как здесь" onclick={() => forceMount(m, 'push')}>⇪ Главная — моя</button>{/if}
+          <button class="b sm" title="Жёсткая сверка: здесь папка станет точно как у хозяина" onclick={() => forceMount(m, 'take')}>⇩ Как у хозяина</button>
           <button class="b sm" data-open="mount" data-peer={m.peer} data-id={m.id}><Gi n="folder" /></button></div>
         <div class="small muted" style="margin-top:4px">{m.files} файлов · {size(m.bytes)} · обмен {ago(m.lastSync)}{m.error && !m.hold ? ' · ' + m.error : ''}</div>
         {#if m.hold}

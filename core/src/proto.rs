@@ -257,6 +257,9 @@ pub struct SharedFolderInfo {
     /// (2.6) Предел размера файла у хозяина, байт; 0 — без предела. Больше — не отправлять (хозяин всё равно откажет).
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub max_bytes: i64,
+    /// (3.11) Метка «версия хозяина главная»: сменилась — соседи берут папку как у хозяина (свои правки — в корзину).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub force: String,
 }
 
 fn is_zero_i64(v: &i64) -> bool {

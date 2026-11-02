@@ -93,6 +93,13 @@ pub fn routes() -> Router<Arc<Node>> {
         .route(&l("builds"), get(|State(n): St| async move { ok_json(&crate::builds::status(&n)) }))
         .route(&l("builds/send"), post(builds_send))
         .route(&l("builds/target"), post(builds_target))
+        // (3.11) своя программа для запуска присланной сборки — только с панели этого ПК (не с телефона)
+        .route(&l("builds/exe"), post(|State(n): St, Json(v): Json<Value>| async move {
+            if n.remote.active().is_some() {
+                return err(423, "пока этим ПК управляют, менять нельзя");
+            }
+            match crate::builds::set_exe(&n, v["peer"].as_str().unwrap_or(""), v["name"].as_str().unwrap_or(""), v["exe"].as_str().unwrap_or("")) { Ok(e) => ok_json(&json!({ "ok": true, "exe": e })), Err(e) => err(400, e) }
+        }))
         .route(&l("builds/presets"), get(|State(n): St| async move { ok_json(&json!({ "list": crate::builds::presets(&n) })) }).post(builds_presets))
         .route(&l("builds/preview"), post(builds_preview))
         .route(&l("builds/run"), post(|State(n): St, Json(v): Json<Value>| async move { match crate::builds::run(&n, v["peer"].as_str().unwrap_or(""), v["name"].as_str().unwrap_or("")) { Ok(v) => ok_json(&v), Err(e) => err(400, e) } }))
@@ -109,7 +116,15 @@ pub fn routes() -> Router<Arc<Node>> {
         .route(&l("folders/remove"), post(folders_remove))
         .route(&l("folders/settings"), post(folders_settings))
         .route(&l("mounts/allow-deletes"), post(allow_deletes))
-        .route(&l("mounts/plan"), get(|State(n): St, Query(m): Q| async move { match n.folders.plan(&n, q(&m, "peer"), q(&m, "id")).await { Ok(v) => ok_json(&v), Err((c, e)) => err(c, e) } }))
+        // (3.11) жёсткая сверка папки соседа: {peer, id, mode: push|take}
+        .route(&l("mounts/force"), post(|State(n): St, Json(v): Json<Value>| async move {
+            match n.folders.mount_force(v["peer"].as_str().unwrap_or(""), v["id"].as_str().unwrap_or(""), v["mode"].as_str().unwrap_or("")) { Ok(()) => { n.wake.notify_one(); ok_json(&json!({ "ok": true })) } Err((c, e)) => err(c, e) }
+        }))
+        // (3.11) своя папка: «моя версия главная» для всех соседей {id}
+        .route(&l("folders/force"), post(|State(n): St, Json(v): Json<Value>| async move {
+            match n.folders.own_force(&n, v["id"].as_str().unwrap_or("")) { Ok(r) => ok_json(&r), Err((c, e)) => err(c, e) }
+        }))
+        .route(&l("mounts/plan"), get(|State(n): St, Query(m): Q| async move { match n.folders.plan(&n, q(&m, "peer"), q(&m, "id"), q(&m, "force")).await { Ok(v) => ok_json(&v), Err((c, e)) => err(c, e) } }))
         .route(&l("trash"), get(trash))
         .route(&l("trash/restore"), post(trash_restore))
         .route(&l("fs/list"), get(fs_list))
@@ -221,6 +236,7 @@ pub fn routes() -> Router<Arc<Node>> {
         .route(&l("update/offer"), post(update_offer))
         .route(&l("update/accept"), post(update_accept))
         .route(&l("update/decline"), post(update_decline))
+        .route(&l("update/rejoin"), post(|State(n): St| async move { ok_json(&json!({ "rejoin": crate::update::take_rejoin(&n) })) }))
         .route(&l("assistant/info"), get(assistant_info))
         .route(&l("assistant/wait"), get(assistant_wait))
         .route(&l("assistant/reply"), post(assistant_reply))
@@ -249,11 +265,23 @@ async fn page(State(node): St, app: Option<axum::Extension<FromApp>>) -> Respons
 /// Политика панели: только свои скрипты; ipc.localhost — связь окна приложения с программой; worker и wasm — просмотр PDF.
 pub const PANEL_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; connect-src 'self' ipc: http://ipc.localhost ws://127.0.0.1:*; worker-src 'self' blob:; font-src 'self' data:; frame-src 'self' http://127.0.0.1:* http://localhost:*; frame-ancestors 'none'";
 
-/// Файлы сборки панели (/app/…): имена с хэшем — кэшировать можно навсегда.
-async fn ui_asset(AxPath(path): AxPath<String>) -> Response {
-    let key = format!("app/{}", path.trim_start_matches('/'));
-    let Some((_, data)) = UI_FILES.iter().find(|(n, _)| *n == key) else { return StatusCode::NOT_FOUND.into_response() };
-    let mime = match key.rsplit('.').next().unwrap_or("") {
+/// Страница и файлы панели для окна приложения — без очереди моста (3.10): окно рисуется, даже пока мост занят
+/// стартом. (Content-Type, Cache-Control, CSP, байты); None — это запрос к API.
+pub fn ui_static(node: &Node, path: &str) -> Option<(&'static str, &'static str, Option<&'static str>, Vec<u8>)> {
+    let path = path.split(['?', '#']).next().unwrap_or("");
+    if path == "/" || path == "/ui" {
+        let index = UI_FILES.iter().find(|(n, _)| *n == "index.html").map(|(_, b)| String::from_utf8_lossy(b).into_owned()).unwrap_or_else(|| NO_UI.to_string());
+        let html = index.replace("%%TOKEN%%", "").replace("%%NODE%%", &html_escape(&node.node_name()));
+        return Some(("text/html; charset=utf-8", "no-store", Some(PANEL_CSP), html.into_bytes()));
+    }
+    let rest = path.strip_prefix("/app/")?;
+    let key = format!("app/{}", rest);
+    let (_, data) = UI_FILES.iter().find(|(n, _)| *n == key)?;
+    Some((asset_mime(&key), "public, max-age=31536000, immutable", None, data.to_vec()))
+}
+
+fn asset_mime(key: &str) -> &'static str {
+    match key.rsplit('.').next().unwrap_or("") {
         "js" | "mjs" => "text/javascript; charset=utf-8",
         "css" => "text/css; charset=utf-8",
         "svg" => "image/svg+xml",
@@ -262,7 +290,14 @@ async fn ui_asset(AxPath(path): AxPath<String>) -> Response {
         "wasm" => "application/wasm",
         "json" => "application/json",
         _ => "application/octet-stream",
-    };
+    }
+}
+
+/// Файлы сборки панели (/app/…): имена с хэшем — кэшировать можно навсегда.
+async fn ui_asset(AxPath(path): AxPath<String>) -> Response {
+    let key = format!("app/{}", path.trim_start_matches('/'));
+    let Some((_, data)) = UI_FILES.iter().find(|(n, _)| *n == key) else { return StatusCode::NOT_FOUND.into_response() };
+    let mime = asset_mime(&key);
     let mut r = Response::new(Body::from(*data));
     r.headers_mut().insert("Content-Type", HeaderValue::from_static(mime));
     r.headers_mut().insert("Cache-Control", HeaderValue::from_static("public, max-age=31536000, immutable"));
@@ -1776,7 +1811,7 @@ async fn api_index() -> Response {
             "GET overview — всё для панели", "GET status", "GET peers", "POST peers/connect {address, secret?, title?}", "POST peers/invite?title",
             "GET peers/check[?name]", "POST peers/rename?name&to", "POST peers/remove?name", "POST peers {name, title?, ip?, port?, extraIps?, secret?, enabled?, shares?, groups?}",
             "GET groups", "POST groups {id, title, members}", "POST groups/remove?id", "GET access — кто что видит",
-            "POST mailbox/upload?peer&path (тело — файл)", "POST upload/part?id&offset (большие файлы частями; затем вызов с ?upload=id&size=N)", "GET builds", "GET mounts/plan?peer&id", "POST builds/send {peer, path, name, mode: patch|clean}", "POST builds/target {peer, name, path}", "GET mailbox/outgoing", "POST mailbox/cancel?peer&path", "GET mailbox/incoming", "GET mailbox/incoming/file?path",
+            "POST mailbox/upload?peer&path (тело — файл)", "POST upload/part?id&offset (большие файлы частями; затем вызов с ?upload=id&size=N)", "GET builds", "GET mounts/plan?peer&id&force=push|take", "POST mounts/force {peer, id, mode: push|take}", "POST folders/force {id}", "POST builds/send {peer, path, name, mode: patch|clean}", "POST builds/target {peer, name, path}", "POST builds/exe {peer, name, exe}", "GET mailbox/outgoing", "POST mailbox/cancel?peer&path", "GET mailbox/incoming", "GET mailbox/incoming/file?path",
             "GET folders", "POST folders {id, title, path, access:{сосед|@группа|*: read|write}}", "POST folders/remove?id", "GET fs/list?kind&id[&peer]", "POST fs/upload?kind&id[&peer]&path", "POST fs/delete", "GET fs/file",
             "GET ignore", "POST ignore {scope, id, peer, patterns}", "POST ignore/add|remove {scope, id, peer, pattern}", "GET ignore/test?path[&scope&id&peer]",
             "GET records[?share&type&status&assignee&q]", "GET records/{id}", "GET records/{id}/history", "POST actions {action, …}", "GET wait?share&after&timeout",
@@ -1989,7 +2024,7 @@ async fn agent_get(State(node): St) -> Response {
     };
     ok_json(&json!({
         "settings": cfg.agent, "claude": crate::agent::find_claude(&node).map(|p| p.display().to_string()), "workDir": crate::agent::work_dir(&node),
-        "exchange": exchange, "peers": peers, "threads": node.agent.list(), "mcp": mcp_hint(&node),
+        "exchange": exchange, "peers": peers, "threads": node.agent.list(), "mcp": mcp_hint(&node), "fileChannel": node.efc.agent_view(&node),
         "local": { "name": node.node_name(), "mode": cfg.agent.mode },
     }))
 }

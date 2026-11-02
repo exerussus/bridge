@@ -284,7 +284,12 @@ impl PeerClient {
 
     /// Скачать файл во временный и проверить sha. Возвращает sha.
     async fn download_to(&self, rel: &str, dest: &Path, max_bytes: i64, what: &str, label: &str) -> Result<String, PeerError> {
-        let resp = Self::ensure(self.send(Method::GET, rel, Body::Empty).await?).await?;
+        self.download_req(Method::GET, rel, Body::Empty, dest, max_bytes, what, label).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn download_req(&self, method: Method, rel: &str, body: Body, dest: &Path, max_bytes: i64, what: &str, label: &str) -> Result<String, PeerError> {
+        let resp = Self::ensure(self.send(method, rel, body).await?).await?;
         let guard = self.progress.as_ref().map(|t| t.start("down", &self.peer_name, what, label, resp.content_length().unwrap_or(0) as i64));
         if let Some(len) = resp.content_length() {
             if len as i64 > max_bytes {
@@ -364,6 +369,32 @@ impl PeerClient {
 
     pub async fn folder_download(&self, id: &str, p: &str, dest: &Path, max: i64) -> Result<String, PeerError> {
         self.download_to(&format!("{}/file?path={}", Self::f(id), esc(p)), dest, max, "папка", p).await
+    }
+
+    /// (3.11) Несколько файлов общей папки соседа одним архивом (см. pack.rs). 404/405 — сосед старый: по одному.
+    pub async fn folder_pack_get(&self, id: &str, paths: &[String], dest: &Path, max: i64, label: &str) -> Result<String, PeerError> {
+        let body = serde_json::to_vec(&serde_json::json!({ "paths": paths })).unwrap_or_default();
+        self.download_req(Method::POST, &format!("{}/pack", Self::f(id)), Body::Json(body), dest, max, "папка", label).await
+    }
+
+    /// (3.11) Свои правки хозяину одним архивом: {results: [{path, code, message}]}.
+    pub async fn folder_pack_put(&self, id: &str, zip: &Path, sha: &str, label: &str) -> Result<serde_json::Value, PeerError> {
+        let size = std::fs::metadata(zip).map(|m| m.len()).unwrap_or(0);
+        let rel = format!("{}/pack?sha={}&size={}", Self::f(id), sha, size);
+        let resp = Self::ensure(self.send(Method::PUT, &rel, Body::File(zip.to_path_buf(), sha.to_string(), label.to_string())).await?).await?;
+        resp.json().await.map_err(|e| PeerError::Io(e.to_string()))
+    }
+
+    /// (3.11) Несколько файлов пространства одним архивом.
+    pub async fn share_pack_get(&self, share: &str, paths: &[String], dest: &Path, max: i64, label: &str) -> Result<String, PeerError> {
+        let body = serde_json::to_vec(&serde_json::json!({ "paths": paths })).unwrap_or_default();
+        self.download_req(Method::POST, &format!("{}/pack", Self::p(share)), Body::Json(body), dest, max, "пространство", label).await
+    }
+
+    /// (3.11) Несколько файлов «Отправки» одним архивом.
+    pub async fn mailbox_pack_get(&self, paths: &[String], dest: &Path, max: i64, label: &str) -> Result<String, PeerError> {
+        let body = serde_json::to_vec(&serde_json::json!({ "paths": paths })).unwrap_or_default();
+        self.download_req(Method::POST, &format!("{}/peer/mailbox/pack", API_PREFIX), Body::Json(body), dest, max, "отправка", label).await
     }
 
     /// Записать файл в общую папку соседа. base — sha, от которой сделана правка ("" — файла не было). 409 — конфликт.

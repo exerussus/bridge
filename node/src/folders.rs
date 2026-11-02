@@ -48,6 +48,10 @@ pub struct Mount {
     pub owner_rev: String,
     /// Предел размера файла у хозяина, байт (0 — без предела или старая версия).
     pub owner_max: i64,
+    /// (3.11) Жёсткая сверка при следующем обмене: "push" — главная копия здесь, "take" — у хозяина.
+    pub force: String,
+    /// (3.11) Последняя исполненная метка «версия хозяина главная».
+    pub owner_force: String,
 }
 
 impl Default for Mount {
@@ -73,6 +77,8 @@ impl Default for Mount {
             recent_deletes: Vec::new(),
             owner_rev: String::new(),
             owner_max: 0,
+            force: String::new(),
+            owner_force: String::new(),
         }
     }
 }
@@ -110,6 +116,8 @@ pub struct Folders {
     /// Большие файлы идут в фоне и не держат остальные: что сейчас передаётся, что уже скачано и ждёт установки, что не прошло.
     transfers: Mutex<HashMap<String, Transfer>>,
     prefetched: Mutex<HashMap<String, (PathBuf, String)>>,
+    /// (3.11) Соседи без передачи пачкой (старая версия) — с ними по одному файлу.
+    no_pack: Mutex<HashSet<String>>,
     failed: Mutex<HashMap<String, Failed>>,
     notes: Mutex<Vec<(String, String)>>,
 }
@@ -177,6 +185,7 @@ impl Folders {
             mounts_touched: AtomicBool::new(true),
             transfers: Mutex::new(HashMap::new()),
             prefetched: Mutex::new(HashMap::new()),
+            no_pack: Mutex::new(HashSet::new()),
             failed: Mutex::new(HashMap::new()),
             notes: Mutex::new(Vec::new()),
         }
@@ -343,9 +352,9 @@ impl Folders {
         let root = self.own_root(node, f);
         let ig = self.own_ignore(node, f);
         let mut sc = self.own_scanners.lock();
-        let s = sc.entry(key.clone()).or_insert_with(|| TreeScanner::new(root.clone()));
+        let s = sc.entry(key.clone()).or_insert_with(|| TreeScanner::new(root.clone()).with_settle(node.settle_secs));
         if s.root() != root {
-            *s = TreeScanner::new(root.clone());
+            *s = TreeScanner::new(root.clone()).with_settle(node.settle_secs);
         }
         let mut busy = 0;
         let files: Vec<FileEntry> = s.scan(&mut busy).into_iter().filter(|x| !ig.is_ignored(&x.path)).collect();
@@ -383,6 +392,7 @@ impl Folders {
                     ignore: self.own_ignore(node, f).patterns(),
                     rev: bridge_core::proto::files_rev(&files),
                     max_bytes: if cfg.max_file_mb > 0 { cfg.max_file_mb * 1024 * 1024 } else { 0 },
+                    force: self.own_force_mark(node, &f.id),
                 })
             })
             .collect()
@@ -409,6 +419,12 @@ impl Folders {
 
     /// Записать файл от соседа (право write) из временного файла `tmp` (sha уже проверена). (код, сообщение)
     pub async fn own_write(&self, node: &Arc<Node>, id: &str, peer: &str, p: &str, base: &str, sha: &str, tmp: &Path) -> (u16, String) {
+        self.own_write_ex(node, id, peer, p, base, sha, tmp, true).await
+    }
+
+    /// То же; `notify` — оповестить соседей сразу (пачкой — один раз в конце).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn own_write_ex(&self, node: &Arc<Node>, id: &str, peer: &str, p: &str, base: &str, sha: &str, tmp: &Path, notify: bool) -> (u16, String) {
         let cfg = node.cfg.read().clone();
         let Some(f) = cfg.folder(id).cloned() else { return (404, "нет такой папки".into()) };
         match cfg.access_of(&f, peer) {
@@ -451,9 +467,16 @@ impl Folders {
         }
         self.invalidate_own();
         drop(_g);
-        node.info(&format!("[общая «{}»] {} записал {}", f.id, peer, p));
+        let size = std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
+        if size == 0 && !current.is_empty() && !current.eq_ignore_ascii_case(path::EMPTY_SHA) {
+            node.info(&format!("[общая «{}»] {} заменил {} пустым файлом (прежняя версия — в корзине папки)", f.id, peer, p));
+        } else {
+            node.info(&format!("[общая «{}»] {} записал {} ({})", f.id, peer, p, human(size as i64)));
+        }
         node.emit("folder-write", serde_json::json!({ "folder": f.id, "peer": peer, "path": p }));
-        self.notify_folder_changed(node, Some(peer));
+        if notify {
+            self.notify_folder_changed(node, Some(peer));
+        }
         (200, "ок".into())
     }
 
@@ -504,7 +527,7 @@ impl Folders {
         }
     }
 
-    fn notify_folder_changed(&self, node: &Arc<Node>, except: Option<&str>) {
+    pub fn notify_folder_changed(&self, node: &Arc<Node>, except: Option<&str>) {
         let cfg = node.cfg.read().clone();
         let names: Vec<String> = cfg
             .peers
@@ -678,6 +701,70 @@ impl Folders {
         self.wake.store(true, Ordering::SeqCst);
     }
 
+    fn force_file(node: &Node) -> PathBuf {
+        node.data_dir.join("state").join("folders-force.json")
+    }
+
+    fn own_force_mark(&self, node: &Node, id: &str) -> String {
+        let v: serde_json::Value = std::fs::read_to_string(Self::force_file(node)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        v[id.to_lowercase()].as_str().unwrap_or("").to_string()
+    }
+
+    /// (3.11) Хозяин: «моя версия главная» — все соседи при следующем обмене берут папку как здесь
+    /// (их правки и лишние файлы — в корзину у них). Файлы здесь пересчитываются заново.
+    pub fn own_force(&self, node: &Arc<Node>, id: &str) -> Result<serde_json::Value, (u16, String)> {
+        let cfg = node.cfg.read().clone();
+        let f = cfg.folder(id).cloned().ok_or((404, "нет такой папки".to_string()))?;
+        if !self.own_root(node, &f).is_dir() {
+            return Err((409, "папки нет на диске".into()));
+        }
+        if let Some(s) = self.own_scanners.lock().get_mut(&f.id.to_lowercase()) {
+            s.forget();
+        }
+        self.invalidate_own();
+        let file = Self::force_file(node);
+        let mut v: serde_json::Value = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| serde_json::json!({}));
+        if !v.is_object() {
+            v = serde_json::json!({});
+        }
+        let mark = format!("{}-{}", chrono::Utc::now().format("%Y%m%dT%H%M%S%.3f"), rand::random::<u32>());
+        v[f.id.to_lowercase()] = serde_json::json!(mark);
+        if let Some(d) = file.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        bridge_core::write_atomic(&file, &v.to_string()).map_err(|e| (500, e.to_string()))?;
+        let files = self.own_files(node, &f);
+        node.info(&format!("[общая «{}»] версия этого ПК объявлена главной — соседи возьмут её ({} файлов)", f.id, files.len()));
+        self.notify_folder_changed(node, None);
+        Ok(serde_json::json!({ "ok": true, "files": files.len() }))
+    }
+
+    /// (3.11) Папка соседа: жёсткая сверка при следующем обмене. push — главная копия здесь (у хозяина станет как здесь,
+    /// его отличия — в его корзину), take — у хозяина (здесь станет как у него, свои отличия — в корзину).
+    pub fn mount_force(&self, peer: &str, id: &str, mode: &str) -> Result<(), (u16, String)> {
+        if mode != "push" && mode != "take" {
+            return Err((400, "mode — push или take".into()));
+        }
+        let key = format!("{}/{}", peer, id).to_lowercase();
+        {
+            let mut g = self.mounts.lock();
+            let m = g.get_mut(&key).ok_or((404, "нет такой папки соседа".to_string()))?;
+            if m.revoked {
+                return Err((409, "хозяин закрыл доступ".into()));
+            }
+            if mode == "push" && m.access != WRITE {
+                return Err((403, "у вас доступ только на чтение — главной может быть только копия хозяина".into()));
+            }
+            m.force = mode.to_string();
+        }
+        if let Some(s) = self.mount_scanners.lock().get_mut(&key) {
+            s.forget();
+        }
+        self.mounts_touched.store(true, Ordering::SeqCst);
+        self.wake.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
     pub fn allow_deletes(&self, peer: &str, id: &str) {
         if let Some(m) = self.mounts.lock().get_mut(&format!("{}/{}", peer, id).to_lowercase()) {
             m.allow_deletes_once = true;
@@ -741,7 +828,11 @@ impl Folders {
                 let key = format!("{}/{}", peer.name, info.id).to_lowercase();
                 let mut m = {
                     let mut g = self.mounts.lock();
-                    let m = g.entry(key.clone()).or_insert_with(|| Mount { peer: peer.name.clone(), id: info.id.clone(), ..Default::default() });
+                    // новая папка: прежние метки хозяина к ней не относятся
+                    let m = g.entry(key.clone()).or_insert_with(|| Mount { peer: peer.name.clone(), id: info.id.clone(), owner_force: info.force.clone(), ..Default::default() });
+                    if !info.force.is_empty() && info.force != m.owner_force && m.force.is_empty() {
+                        m.force = "take".into(); // хозяин объявил свою версию главной
+                    }
                     let root = mroot.join(&peer.name).join(&info.id).to_string_lossy().into_owned();
                     if m.peer != peer.name || m.title != info.title || m.access != info.access || m.root != root || m.revoked || m.owner_ignore != info.ignore {
                         changed = true;
@@ -757,12 +848,16 @@ impl Folders {
                     m.clone()
                 };
                 // У хозяина ничего не менялось, здесь тоже, ничего не задержано — обмен не нужен
-                if !touched && !info.rev.is_empty() && info.rev == m.owner_rev && !m.hold && !m.allow_deletes_once && m.error.is_empty() {
+                if !touched && !info.rev.is_empty() && info.rev == m.owner_rev && !m.hold && !m.allow_deletes_once && m.error.is_empty() && m.force.is_empty() {
                     continue;
                 }
                 changed = true;
                 match self.sync_mount(node, &client, &mut m).await {
                     Ok(()) => {
+                        if !m.force.is_empty() {
+                            m.force.clear();
+                            m.owner_force = info.force.clone();
+                        }
                         if m.error.starts_with("нет связи") {
                             m.error.clear();
                         }
@@ -797,7 +892,8 @@ impl Folders {
     }
 
 /// (3.3.1) План синхронизации папки соседа — что сейчас разошлось и что сделает обмен, без самого обмена.
-    pub async fn plan(&self, node: &Arc<Node>, peer: &str, id: &str) -> Result<serde_json::Value, (u16, String)> {
+    /// `force` (3.11): "push" / "take" — что сделает жёсткая сверка (sha всех файлов пересчитываются).
+    pub async fn plan(&self, node: &Arc<Node>, peer: &str, id: &str, force: &str) -> Result<serde_json::Value, (u16, String)> {
         let m = self.find_mount(peer, id).ok_or((404, "нет такой папки соседа".to_string()))?;
         let pc = node.cfg.read().peer(&m.peer).cloned().ok_or((404, "нет соседа".to_string()))?;
         let client = node.client_for(&pc);
@@ -809,10 +905,13 @@ impl Folders {
             let mut busy = 0;
             let mut sc = self.mount_scanners.lock();
             let s = sc.entry(m.key.to_lowercase()).or_insert_with(|| {
-                let mut t = TreeScanner::new(root.clone());
+                let mut t = TreeScanner::new(root.clone()).with_settle(node.settle_secs);
                 t.skip_top.push(MY_EDITS_DIR.into());
                 t
             });
+            if !force.is_empty() {
+                s.forget();
+            }
             s.scan(&mut busy).into_iter().filter(|f| !ig.is_ignored(&f.path)).map(|f| (f.path.to_lowercase(), f)).collect()
         };
         let write = m.access == WRITE;
@@ -829,7 +928,11 @@ impl Folders {
             if l == r {
                 continue;
             }
-            let b = base_get(&m.base, &p).cloned();
+            let b = match force {
+                "push" => r.clone(),
+                "take" => l.clone(),
+                _ => base_get(&m.base, &p).cloned(),
+            };
             let (lc, rc) = (l != b, r != b);
             let (act, size) = if !lc && rc {
                 match rf {
@@ -886,14 +989,20 @@ impl Folders {
         let remote: HashMap<String, FileEntry> =
             manifest.files.into_iter().filter(|f| path::norm(&f.path).is_some() && !ig.is_ignored(&f.path)).map(|f| (f.path.to_lowercase(), f)).collect();
         let mut busy = 0;
+        let busy_keys: HashSet<String>;
         let local: HashMap<String, FileEntry> = {
             let mut sc = self.mount_scanners.lock();
             let s = sc.entry(m.key.to_lowercase()).or_insert_with(|| {
-                let mut t = TreeScanner::new(root.clone());
+                let mut t = TreeScanner::new(root.clone()).with_settle(node.settle_secs);
                 t.skip_top.push(MY_EDITS_DIR.into());
                 t
             });
-            s.scan(&mut busy).into_iter().filter(|f| !ig.is_ignored(&f.path)).map(|f| (f.path.to_lowercase(), f)).collect()
+            if !m.force.is_empty() {
+                s.forget(); // жёсткая сверка: sha всех файлов заново
+            }
+            let l = s.scan(&mut busy).into_iter().filter(|f| !ig.is_ignored(&f.path)).map(|f| (f.path.to_lowercase(), f)).collect();
+            busy_keys = s.busy_keys.clone();
+            l
         };
         let ignored_base: Vec<String> = m.base.keys().filter(|p| ig.is_ignored(p)).cloned().collect();
         for p in ignored_base {
@@ -944,18 +1053,84 @@ impl Folders {
             m.hold = false;
             m.hold_reason.clear();
         }
-        let allow_deletes = !m.hold || m.allow_deletes_once;
+        // жёсткая сверка: человек сам решил, чья копия главная, — удаления по ней без задержки
+        let force = m.force.clone();
+        if force == "push" && !write {
+            m.force.clear();
+            return Err("доступ только на чтение — своя копия не может быть главной".into());
+        }
+        if !force.is_empty() {
+            m.hold = false;
+            m.hold_reason.clear();
+            Self::note(m, if force == "push" { "жёсткая сверка: главная — копия этого ПК" } else { "жёсткая сверка: главная — копия хозяина" });
+        }
+        let allow_deletes = !m.hold || m.allow_deletes_once || !force.is_empty();
         let scope = mount_scope(m);
+        // (3.11) Пачкой: всё мелкое, что нужно скачать, — одним архивом заранее (в prefetched), свои правки — одним архивом хозяину
+        let mut up_res: HashMap<String, (u16, String, String)> = HashMap::new();
+        if !self.no_pack.lock().contains(&m.peer.to_lowercase()) {
+            let own_max = node.max_file_bytes();
+            let up_max = if m.owner_max > 0 { own_max.min(m.owner_max) } else { own_max };
+            let small = BIG_FILE.min(crate::pack::MAX_ITEM);
+            let mut down: Vec<(String, String, i64)> = Vec::new();
+            let mut up: Vec<(crate::pack::Item, String, i64)> = Vec::new();
+            for p in &paths {
+                let k = p.to_lowercase();
+                if busy_keys.contains(&k) {
+                    continue;
+                }
+                let lf = local.get(&k);
+                let (l, r) = (lf.map(|x| x.sha256.clone()), remote.get(&k).map(|x| x.sha256.clone()));
+                if l == r {
+                    continue;
+                }
+                let b = match force.as_str() {
+                    "push" => r.clone(),
+                    "take" => l.clone(),
+                    _ => base_get(&m.base, p).cloned(),
+                };
+                let (lc, rc) = (l != b, r != b);
+                let tk = tkey(&m.key, p);
+                if self.transfers.lock().contains_key(&tk) {
+                    continue;
+                }
+                if write && lc && !rc {
+                    if let (Some(ls), Some(lf)) = (&l, lf) {
+                        if lf.size <= small && lf.size <= up_max && !self.blocked(&tk, ls) {
+                            if let Ok(full) = path::to_local(&root, p) {
+                                up.push((crate::pack::Item { path: p.clone(), full, base: r.clone().unwrap_or_default() }, ls.clone(), lf.size));
+                            }
+                        }
+                    }
+                } else if let Some(rs) = &r {
+                    let rsize = remote.get(&k).map(|x| x.size).unwrap_or(0);
+                    if rsize <= small && rsize <= own_max && !self.blocked(&tk, rs) && !self.prefetched.lock().contains_key(&tk) {
+                        down.push((p.clone(), rs.clone(), rsize));
+                    }
+                }
+            }
+            if down.len() >= 2 {
+                self.pack_down(node, client, m, down).await;
+            }
+            if up.len() >= 2 && !self.no_pack.lock().contains(&m.peer.to_lowercase()) {
+                up_res = self.pack_up(node, client, m, up).await;
+            }
+        }
         for p in paths {
             let k = p.to_lowercase();
             let l = local.get(&k).map(|x| x.sha256.clone());
             let r = remote.get(&k).map(|x| x.sha256.clone());
-            let b = base_get(&m.base, &p).cloned();
+            // жёсткая сверка: считаем, что изменилась только «неглавная» сторона
+            let b = match force.as_str() {
+                "push" => r.clone(),
+                "take" => l.clone(),
+                _ => base_get(&m.base, &p).cloned(),
+            };
             let lsize = local.get(&k).map(|x| x.size).unwrap_or(0);
             let rsize = remote.get(&k).map(|x| x.size).unwrap_or(0);
             let Ok(full) = path::to_local(&root, &p) else { continue };
-            if l.is_none() && full.exists() {
-                continue; // файл сейчас пишут
+            if busy_keys.contains(&k) || (l.is_none() && full.exists()) {
+                continue; // файл сейчас пишут — ни отправлять, ни затирать
             }
             if l == r {
                 match &l {
@@ -1024,6 +1199,21 @@ impl Folders {
                             let base = r.clone().unwrap_or_default();
                             if lsize > BIG_FILE {
                                 self.spawn_transfer(node, client, m, &p, &full, ls, &base, lsize, true);
+                                continue;
+                            }
+                            if let Some((code, msg, sent)) = up_res.remove(&k) {
+                                match code {
+                                    200 => {
+                                        base_remove(&mut m.base, &p);
+                                        m.base.insert(p.clone(), sent);
+                                    }
+                                    403 => m.error = "запись запрещена хозяином".into(),
+                                    409 => {}
+                                    _ => {
+                                        self.fail(&tk, ls, &msg, Some(120));
+                                        Self::note(m, &format!("не отправлен: {} — {}", p, msg));
+                                    }
+                                }
                                 continue;
                             }
                             match client.folder_upload(&m.id, &p, &full, ls, &base).await {
@@ -1096,6 +1286,105 @@ impl Folders {
         m.last_sync = Some(time::now());
         m.error = if busy > 0 { format!("{} файл(ов) сейчас заняты другой программой — уйдут позже", busy) } else { String::new() };
         Ok(())
+    }
+
+    /// Пачки по MAX_FILES файлов и MAX_BYTES байт.
+    fn chunks<T>(list: Vec<(T, i64)>) -> Vec<Vec<T>> {
+        let mut out: Vec<Vec<T>> = Vec::new();
+        let (mut cur, mut bytes) = (Vec::new(), 0i64);
+        for (x, sz) in list {
+            if !cur.is_empty() && (cur.len() >= crate::pack::MAX_FILES || bytes + sz > crate::pack::MAX_BYTES) {
+                out.push(std::mem::take(&mut cur));
+                bytes = 0;
+            }
+            bytes += sz;
+            cur.push(x);
+        }
+        if !cur.is_empty() {
+            out.push(cur);
+        }
+        out
+    }
+
+    fn pack_unsupported(&self, m: &mut Mount, e: &PeerError) -> bool {
+        if matches!(e.status(), Some(404) | Some(405)) {
+            self.no_pack.lock().insert(m.peer.to_lowercase());
+            return true;
+        }
+        false
+    }
+
+    /// Скачать мелкие файлы архивом: распакованные и проверенные — в prefetched (их поставит обычный проход).
+    async fn pack_down(&self, node: &Arc<Node>, client: &Arc<PeerClient>, m: &mut Mount, list: Vec<(String, String, i64)>) {
+        let groups = Self::chunks(list.into_iter().map(|(p, s, sz)| ((p, s, sz), sz)).collect());
+        for g in groups {
+            let want: HashMap<String, String> = g.iter().map(|(p, s, _)| (p.to_lowercase(), s.to_lowercase())).collect();
+            let bytes: i64 = g.iter().map(|x| x.2).sum();
+            let paths: Vec<String> = g.iter().map(|x| x.0.clone()).collect();
+            let zip = node.tmp_file();
+            let _guard = crate::pack::TmpGuard(zip.clone());
+            let label = format!("{} файлов архивом", paths.len());
+            match client.folder_pack_get(&m.id, &paths, &zip, bytes + bytes / 8 + 16 * 1024 * 1024, &label).await {
+                Ok(_) => {}
+                Err(e) => {
+                    if !self.pack_unsupported(m, &e) {
+                        node.info(&format!("[общая {}] архивом не вышло ({}) — по одному", m.key, e));
+                    }
+                    return;
+                }
+            }
+            let (n2, z2, w2) = (node.clone(), zip.clone(), want.clone());
+            let max = BIG_FILE.min(crate::pack::MAX_ITEM);
+            let got = tokio::task::spawn_blocking(move || crate::pack::extract(&z2, &|p| w2.contains_key(&p.to_lowercase()), &|| n2.tmp_file(), max)).await;
+            let Ok(Ok(got)) = got else { return };
+            let n = got.len();
+            for (k, g) in got {
+                if want.get(&k).map(|s| s.eq_ignore_ascii_case(&g.sha)).unwrap_or(false) {
+                    self.prefetched.lock().insert(tkey(&m.key, &g.path), (g.tmp, g.sha));
+                } else {
+                    let _ = std::fs::remove_file(&g.tmp); // у хозяина файл уже другой — возьмём в следующий раз
+                }
+            }
+            node.info(&format!("[общая {}] получено архивом: {} файл(ов)", m.key, n));
+        }
+    }
+
+    /// Отправить свои правки архивом. Ответ хозяина по каждому файлу: путь → (код, сообщение, sha отправленного).
+    async fn pack_up(&self, node: &Arc<Node>, client: &Arc<PeerClient>, m: &mut Mount, list: Vec<(crate::pack::Item, String, i64)>) -> HashMap<String, (u16, String, String)> {
+        let mut res = HashMap::new();
+        let groups = Self::chunks(list.into_iter().map(|(it, _, sz)| (it, sz)).collect());
+        for g in groups {
+            let zip = node.tmp_file();
+            let _guard = crate::pack::TmpGuard(zip.clone());
+            let z2 = zip.clone();
+            let built = tokio::task::spawn_blocking(move || crate::pack::build(&g, &z2).map(|meta| (meta, g.len()))).await;
+            let Ok(Ok((meta, n))) = built else { return res };
+            let Ok(sha) = path::sha256_file(&zip) else { return res };
+            let sent: HashMap<String, String> = meta.iter().filter_map(|x| Some((x["path"].as_str()?.to_lowercase(), x["sha256"].as_str()?.to_string()))).collect();
+            match client.folder_pack_put(&m.id, &zip, &sha, &format!("{} файлов архивом", n)).await {
+                Ok(v) => {
+                    let mut ok = 0;
+                    for r in v["results"].as_array().cloned().unwrap_or_default() {
+                        let p = r["path"].as_str().unwrap_or("").to_lowercase();
+                        let code = r["code"].as_u64().unwrap_or(0) as u16;
+                        if code == 200 {
+                            ok += 1;
+                        }
+                        if let Some(s) = sent.get(&p) {
+                            res.insert(p, (code, r["message"].as_str().unwrap_or("").to_string(), s.clone()));
+                        }
+                    }
+                    Self::note(m, &format!("отправлено хозяину архивом: {} из {}", ok, n));
+                }
+                Err(e) => {
+                    if !self.pack_unsupported(m, &e) {
+                        node.info(&format!("[общая {}] отправить архивом не вышло ({}) — по одному", m.key, e));
+                    }
+                    return res;
+                }
+            }
+        }
+        res
     }
 
     #[allow(clippy::too_many_arguments)]

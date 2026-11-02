@@ -178,7 +178,9 @@ pub fn run() {
             return;
         }
     }
-    let rt = match tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().thread_name("bridge").build() {
+    // потоков не меньше 4: тяжёлые проходы по папкам при старте не должны занимать все и вешать панель
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(4, 8);
+    let rt = match tokio::runtime::Builder::new_multi_thread().worker_threads(threads).enable_all().thread_name("bridge").build() {
         Ok(r) => r,
         Err(e) => return message_box(&format!("Не удалось запустить: {}", e)),
     };
@@ -276,6 +278,8 @@ unsafe fn ui_loop(node: Arc<Node>, rt: tokio::runtime::Runtime, created: bool, s
             received: Vec::new(),
         })
     });
+    PROBE.lock().node = node.node_name();
+    start_probe(node.clone());
     add_icon(hwnd);
     refresh();
     SetTimer(hwnd, TIMER_ID, 2000, None);
@@ -285,6 +289,9 @@ unsafe fn ui_loop(node: Arc<Node>, rt: tokio::runtime::Runtime, created: bool, s
         if created {
             open_panel(&n2, "peers");
             let _ = n2;
+        } else if bridge_node::update::rejoin_pending(&n2) {
+            // после обновления ПК сидел в канале: голос живёт в окне — открыть его, панель вернётся в канал
+            open_panel(&n2, "voice");
         } else if !silent && n2.cfg.read().ui.auto_open {
             open_panel(&n2, "home");
         }
@@ -353,13 +360,23 @@ pub fn balloon(title: &str, text: &str, tab: &str) {
     });
 }
 
-/// Обновить значок и подсказку по состоянию узла.
-fn refresh() {
-    let mut notes: Vec<(String, String, String)> = Vec::new();
-    APP.with(|a| {
-        let mut b = a.borrow_mut();
-        let Some(app) = b.as_mut() else { return };
-        let node = &app.node;
+/// Сводка для значка у часов (считается в своём потоке раз в секунду).
+#[derive(Clone, Default)]
+struct Probe {
+    node: String,
+    total: usize,
+    online: usize,
+    waiting: usize,
+    attention: usize,
+    unread: u64,
+}
+static PROBE: Mutex<Probe> = Mutex::new(Probe { node: String::new(), total: 0, online: 0, waiting: 0, attention: 0, unread: 0 });
+
+fn start_probe(node: Arc<Node>) {
+    let _ = std::thread::Builder::new().name("bridge-tray".into()).spawn(move || loop {
+        if node.shutdown.is_cancelled() {
+            break;
+        }
         let cfg = node.cfg.read().clone();
         let (mut total, mut online) = (0, 0);
         for p in cfg.peers.iter().filter(|p| p.enabled && p.has_url()) {
@@ -368,14 +385,33 @@ fn refresh() {
                 online += 1;
             }
         }
-        let waiting = node.runner.waiting_count();
-        let attention = bridge_node::http_local::attention_count(node);
+        let p = Probe {
+            node: cfg.node.clone(),
+            total,
+            online,
+            waiting: node.runner.waiting_count(),
+            attention: bridge_node::http_local::attention_count(&node),
+            unread: node.assistant.unread(),
+        };
+        *PROBE.lock() = p;
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    });
+}
+
+/// Обновить значок и подсказку по состоянию узла.
+fn refresh() {
+    let mut notes: Vec<(String, String, String)> = Vec::new();
+    APP.with(|a| {
+        let mut b = a.borrow_mut();
+        let Some(app) = b.as_mut() else { return };
+        let node = &app.node;
+        // сводку считает отдельный поток: окно не ждёт замков моста (иначе при тяжёлом старте окно белеет и не отвечает)
+        let Probe { node: node_name, total, online, waiting, attention, unread } = PROBE.lock().clone();
         if attention > app.attention {
             notes.push(("Для вас новые записи".into(), format!("Ждут вашего действия: {}", attention), "records".into()));
         }
         app.attention = attention;
         let color = if total == 0 { 0 } else if online == total { 1 } else if online == 0 { 3 } else { 2 };
-        let unread = node.assistant.unread();
         let muted = node.remote.muted_by();
         let control = node.remote.active();
         let state = if control.is_some() { 9 } else if !muted.is_empty() { 8 } else { color + if waiting + attention + unread as usize > 0 { 4 } else { 0 } };
@@ -388,7 +424,7 @@ fn refresh() {
         } else {
             format!("на связи {} из {}", online, total)
         };
-        let mut tip = format!("Мост · {}\n{}", cfg.node, status);
+        let mut tip = format!("Мост · {}\n{}", node_name, status);
         if let Some(g) = &control {
             tip = format!("ВАШИМ ПК УПРАВЛЯЕТ {}\n{} · меню: «Остановить управление»", g.peer, if g.keyboard { "мышь и клавиатура" } else { "мышь" });
         } else if !muted.is_empty() {
@@ -632,7 +668,10 @@ unsafe fn command(hwnd: HWND, cmd: usize) {
             if let Some(app) = app {
                 app.node.shutdown.cancel();
                 let node = app.node.clone();
-                app.rt.block_on(async move { node.stop().await });
+                // остановка не дольше 8 с: даже если мост завис, программа закроется
+                app.rt.block_on(async move {
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(8), node.stop()).await;
+                });
                 app.rt.shutdown_timeout(std::time::Duration::from_secs(3));
             }
             if panel::app().is_some() {

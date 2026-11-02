@@ -26,10 +26,10 @@
 <h3>{id ? 'Папка «' + id + '»' : 'Новая общая папка'}</h3>
 {#if id}
   <label class="f">Короткое имя (латиница, цифры, - и _; потом не меняется)<input value={fid} disabled /></label>
-  <label class="f">Название для людей<input bind:value={title} use:focus placeholder="Обмен с технологом" /></label>
+  <label class="f">Название для людей<input bind:value={title} use:focus placeholder="Общие документы" /></label>
 {:else}
   <label class="f">Короткое имя (латиница, цифры, - и _; потом не меняется)<input bind:value={fid} use:focus placeholder="obmen" /></label>
-  <label class="f">Название для людей<input bind:value={title} placeholder="Обмен с технологом" /></label>
+  <label class="f">Название для людей<input bind:value={title} placeholder="Общие документы" /></label>
 {/if}
 <label class="f">Где лежит на этом ПК (пусто — общие-мои\имя)<input bind:value={path} placeholder="D:\Проект\Обмен" /></label>
 <div class="small muted" style="margin-bottom:6px">Кому доступ{groups.length ? ' — группе целиком или отдельным соседям (у соседа действует большее из прав)' : ''}</div>

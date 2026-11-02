@@ -270,7 +270,7 @@ fn setup(file: &Path) -> Result<(), String> {
     let share = if share_id == "-" {
         None
     } else {
-        let folder = ask("6. Папка пространства на этом ПК", Some("CORA-мост"), |_| None);
+        let folder = ask("6. Папка пространства на этом ПК", Some("Обмен"), |_| None);
         let pats = ask("7. Какие файлы принимать от соседа — шаблоны через запятую", Some("**"), |_| None);
         Some((share_id.clone(), folder, pats.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect::<Vec<_>>()))
     };

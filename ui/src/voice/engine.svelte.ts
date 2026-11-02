@@ -721,11 +721,24 @@ async function onUi(m: any) {
   api('POST', 'ui/result', Object.assign({ id: m.id }, res)).catch(() => {});
 }
 
+/** Мост перезапустился после обновления, а ПК сидел в канале — вернуться туда тихо (3.10). */
+async function rejoinAfterUpdate() {
+  try {
+    const r = await api('POST', 'update/rejoin');
+    const k = r && r.rejoin && r.rejoin.room;
+    if (!k || R.key) return;
+    if (!roomDef(k)) { toast('Канал «' + (r.rejoin.title || k) + '» больше не найден — не вернулись после обновления', 'bad'); return; }
+    await roomJoin(k, true);
+    if (R.key === k) toast('Мост обновился — вы снова в канале «' + (R.title || k) + '»', 'ok');
+  } catch {}
+}
+
 let started = false;
 export function voiceStart() {
   if (started) return;
   started = true;
-  loadAvatars(); loadChannels(); loadIce();
+  loadAvatars(); loadIce();
+  loadChannels().then(rejoinAfterUpdate);
   onMedia(m => {
     const kind = m.media || 'voice';
     if (kind === 'room') onRoomQueued(m);

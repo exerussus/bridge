@@ -124,11 +124,11 @@
       <div class="row"><h3 style="margin:0" class="grow ell">{P.name || 'Без названия'}</h3><span class="small muted svd">{saved}</span>
         <button class="b sm" onclick={dup}>Копия</button><button class="b sm danger" onclick={del}>Удалить</button></div>
       <div class="bgrid">
-        <label class="f">Название<input value={P.name} placeholder={guess(P.path) || 'CORA'} oninput={e => edit(p => { p.name = (e.target as HTMLInputElement).value; })} /></label>
-        <label class="f">Папка сборки на этом ПК<input class="mono" value={P.path} placeholder="D:\Unity\CORA\Build" oninput={e => edit(p => { p.path = (e.target as HTMLInputElement).value; if (!p.name || p.name === 'Новая сборка') p.name = guess(p.path) || p.name; }, true)} /></label>
+        <label class="f">Название<input value={P.name} placeholder={guess(P.path) || 'Моя игра'} oninput={e => edit(p => { p.name = (e.target as HTMLInputElement).value; })} /></label>
+        <label class="f">Папка сборки на этом ПК<input class="mono" value={P.path} placeholder="D:\Проекты\Игра\Build" oninput={e => edit(p => { p.path = (e.target as HTMLInputElement).value; if (!p.name || p.name === 'Новая сборка') p.name = guess(p.path) || p.name; }, true)} /></label>
       </div>
       <label class="f" style="margin-top:10px">Что запускать у получателя <span class="muted">(необязательно — тогда у него будет кнопка «Запустить»)</span>
-        <input class="mono" list="bexes" value={P.exe} placeholder={pv?.exes?.[0] || 'CORA.exe'} oninput={e => edit(p => { p.exe = (e.target as HTMLInputElement).value.trim(); })} />
+        <input class="mono" list="bexes" value={P.exe} placeholder={pv?.exes?.[0] || 'Game.exe'} oninput={e => edit(p => { p.exe = (e.target as HTMLInputElement).value.trim(); })} />
         <datalist id="bexes">{#each pv?.exes || [] as x (x)}<option value={x}></option>{/each}</datalist>
       </label>
       {#if pv?.exes?.length && !P.exe}<div class="row small" style="gap:6px;flex-wrap:wrap;margin-top:4px"><span class="muted">Нашлось:</span>{#each pv.exes.slice(0, 4) as x (x)}<button class="b sm" onclick={() => edit(p => { p.exe = x; })}>{x}</button>{/each}</div>{/if}

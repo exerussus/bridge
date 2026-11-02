@@ -10,28 +10,39 @@ use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-pub const README: &str = "Папка _bridge — файловый интерфейс узла моста (Exerussus.Bridge). Пишет узел; не правьте файлы, кроме outbox/.
+pub const README: &str = "Папка _bridge — файловый интерфейс узла моста (Exerussus.Bridge). Пишет узел; не правьте файлы, кроме requests/, cancel/ и outbox/.
+Папка не синхронизируется с соседами: запросы выполняет только этот ПК.
 
-status.json                 — узел, соседи (онлайн, ошибки), последний обмен, конфликты файлов, команды на подтверждении
-index.json                  — все записи пространства: id, тип, статус, заголовок, версия, исполнитель
-records/<тип>/<id>.json     — запись целиком: поля, статус, версия, конфликты, комментарии, вложения, подтверждения, доставка
-records/<тип>/<id>.history.json — все события записи по порядку (кто, когда, что)
-inbox/                      — то, что ждёт действия ЭТОГО узла (по файлу на запись)
-rejected.json               — события соседей, которые узел не принял, и почему
-outbox/                     — сюда класть действия: файл *.json с одним действием или массивом действий.
-                              Узел выполнит и перенесёт файл в outbox/done/ (+ .result.json) или outbox/failed/ (+ .error.txt).
+Файловый канал efc/1 (с 3.12) — рекомендуемый способ:
+  channel.json                — паспорт канала: команды, лимиты, корни путей
+  alive.json                  — пульс узла (seq растёт каждые 2 с)
+  requests/<id>.json          — запрос: {\"v\":1,\"id\":\"<id>\",\"command\":\"<действие>\",\"params\":{…}} → active/ → done/<id>.json
+  cancel/, trash/             — отмена и корзина (прочитанное переносите в trash/, узел чистит)
+  efc                         — клиент для Linux/VM:  ./efc --channel . --params '{\"record\":\"<id>\",\"text\":\"…\"}' call comment
+  Пакеты, шаги с подстановкой ${шаг.поле}, отмена и ожидание — по стандарту efc/1 (efc help, efc batch).
 
-Действие (JSON):
-  {\"action\":\"create\",\"type\":\"task\",\"fields\":{\"title\":\"…\",\"assignee\":\"<узел>\",\"body\":\"…\"},\"actor\":\"кто\",\"note\":\"…\"}
-  {\"action\":\"transition\",\"record\":\"<id>\",\"to\":\"accepted|in_progress|review|done|…\",\"note\":\"…\"}
-  {\"action\":\"set\",\"record\":\"<id>\",\"fields\":{\"поле\":\"значение\"},\"expectVersion\":3}
-  {\"action\":\"comment\",\"record\":\"<id>\",\"text\":\"…\",\"replyTo\":\"<eid>\"}
-  {\"action\":\"ack\",\"record\":\"<id>\",\"level\":\"accepted|rejected|seen\",\"text\":\"…\"}
-  {\"action\":\"attach\",\"record\":\"<id>\",\"path\":\"папка/файл.ext\",\"title\":\"…\"}
-  {\"action\":\"link\",\"record\":\"<id>\",\"target\":\"<другой id>\",\"rel\":\"relates\"}
-  {\"action\":\"create\",\"type\":\"dto\",\"schema\":\"имя@1\",\"fields\":{…}}         — проверяется по _schemas/имя@1.json
-  {\"action\":\"create\",\"type\":\"command\",\"fields\":{\"assignee\":\"<узел>\",\"runner\":\"<имя>\",\"args\":{…},\"title\":\"…\"}}
-  {\"action\":\"approve\",\"record\":\"<id>\"}  /  {\"action\":\"reject\",\"record\":\"<id>\",\"note\":\"причина\"}
+Снимки (только чтение):
+  status.json                 — узел, соседи (онлайн, ошибки), последний обмен, конфликты файлов, команды на подтверждении
+  index.json                  — все записи пространства: id, тип, статус, заголовок, версия, исполнитель
+  records/<тип>/<id>.json     — запись целиком: поля, статус, версия, конфликты, комментарии, вложения, подтверждения, доставка
+  records/<тип>/<id>.history.json — все события записи по порядку (кто, когда, что)
+  inbox/<id>.json             — что ждёт действия ЭТОГО узла (why — что сделать, suggest — готовые запросы)
+  rejected.json               — события соседей, которые узел не принял, и почему
+
+Команды канала (= действия) и params:
+  create      {\"type\":\"task\",\"fields\":{\"title\":\"…\",\"assignee\":\"<узел>\",\"body\":\"…\"},\"note\":\"…\"}
+  transition  {\"record\":\"<id>\",\"to\":\"accepted|in_progress|review|done|…\",\"note\":\"…\"}
+  set         {\"record\":\"<id>\",\"fields\":{\"поле\":\"значение\"},\"expectVersion\":3}
+  comment     {\"record\":\"<id>\",\"text\":\"…\",\"replyTo\":\"<eid>\"}
+  ack         {\"record\":\"<id>\",\"level\":\"accepted|rejected|seen\",\"text\":\"…\"}
+  attach      {\"record\":\"<id>\",\"path\":\"папка/файл.ext\",\"title\":\"…\"}
+  link        {\"record\":\"<id>\",\"target\":\"<другой id>\",\"rel\":\"relates\"}
+  create dto  {\"type\":\"dto\",\"schema\":\"имя@1\",\"fields\":{…}}         — проверяется по _schemas/имя@1.json
+  create command {\"type\":\"command\",\"fields\":{\"assignee\":\"<узел>\",\"runner\":\"<имя>\",\"args\":{…},\"title\":\"…\"}}
+  approve     {\"record\":\"<id>\"}   /   reject {\"record\":\"<id>\",\"note\":\"причина\"}
+
+outbox/ (устарело, работает как раньше) — файл *.json с одним действием {\"action\":\"comment\",…} или массивом;
+  узел выполнит и перенесёт его в outbox/done/ (+ .result.json) или outbox/failed/ (+ .error.txt).
 
 Задача: new → accepted → in_progress → review → done. Принимает, начинает и сдаёт исполнитель; закрывает (done)
 или возвращает на доработку (in_progress, с note) постановщик. Отказ — rejected (исполнитель), отмена — cancelled (постановщик).
@@ -53,9 +64,11 @@ pub fn write(node: &Arc<Node>, rt: &Arc<ShareRt>) {
 fn write_inner(node: &Arc<Node>, rt: &Arc<ShareRt>) -> std::io::Result<()> {
     let dir = rt.root.join(bridge_core::SERVICE_DIR);
     std::fs::create_dir_all(dir.join("outbox"))?;
+    // README пишет и сервер efc (общий текст при открытии канала) — оставляем свой, полный
     let readme = dir.join("README.txt");
-    if !readme.exists() {
-        write_atomic(&readme, &README.replace('\n', "\r\n"))?;
+    let text = README.replace('\n', "\r\n");
+    if std::fs::read_to_string(&readme).map(|t| t != text).unwrap_or(true) {
+        write_atomic(&readme, &text)?;
     }
     let peers = rt.peers(node);
     let schemas = rt.schemas();
@@ -86,20 +99,23 @@ fn write_inner(node: &Arc<Node>, rt: &Arc<ShareRt>) -> std::io::Result<()> {
     for s in &all {
         let (creator, assignee) = roles(s, &me);
         let st = s.status().unwrap_or("");
-        let mut why: Option<String> = match s.type_.as_str() {
-            record_types::TASK if assignee && st == "new" => Some("новая задача: принять (accepted) или отказать (rejected)".into()),
-            record_types::TASK if assignee && st == "accepted" => Some("принята: начать (in_progress)".into()),
-            record_types::TASK if assignee && st == "in_progress" => Some("в работе: сдать (review)".into()),
-            record_types::TASK if creator && st == "review" => Some("сдана: проверить — done или вернуть in_progress с пояснением".into()),
-            record_types::COMMAND if assignee && st == "pending" && node.runner.is_waiting(&rt.id, &s.id) => Some("команда ждёт подтверждения человека".into()),
-            record_types::DECISION if !creator && st == "proposed" => Some("решение предложено: accepted или rejected".into()),
-            _ => None,
+        // why — что сделать; suggest — готовые запросы efc (переходы), которые клиент кладёт в requests/ почти без правок
+        let tr = |to: &str| json!({ "command": "transition", "params": { "record": s.id, "to": to } });
+        let (mut why, suggest): (Option<String>, Vec<Value>) = match s.type_.as_str() {
+            record_types::TASK if assignee && st == "new" => (Some("новая задача: принять (accepted) или отказать (rejected)".into()), vec![tr("accepted"), tr("rejected")]),
+            record_types::TASK if assignee && st == "accepted" => (Some("принята: начать (in_progress)".into()), vec![tr("in_progress")]),
+            record_types::TASK if assignee && st == "in_progress" => (Some("в работе: сдать (review)".into()), vec![tr("review")]),
+            record_types::TASK if creator && st == "review" => (Some("сдана: проверить — done или вернуть in_progress с пояснением".into()), vec![tr("done"), tr("in_progress")]),
+            record_types::COMMAND if assignee && st == "pending" && node.runner.is_waiting(&rt.id, &s.id) => (Some("команда ждёт подтверждения человека".into()), vec![]),
+            record_types::DECISION if !creator && st == "proposed" => (Some("решение предложено: accepted или rejected".into()), vec![tr("accepted"), tr("rejected")]),
+            _ => (None, vec![]),
         };
         if why.is_none() && !s.conflicts.is_empty() {
             why = Some(format!("встречные правки полей: {}", s.conflicts.keys().cloned().collect::<Vec<_>>().join(", ")));
         }
         if let Some(w) = why {
-            want.push((s.id.clone(), json!({ "why": w, "record": shares::summary(&rt.id, s) })));
+            // поля efc/1 (v, key, since, suggest) — рядом с прежними why и record
+            want.push((s.id.clone(), json!({ "v": 1, "key": s.id, "why": w, "since": time::format(&s.updated), "suggest": suggest, "record": shares::summary(&rt.id, s) })));
         }
     }
     for (id, item) in &want {
@@ -134,6 +150,7 @@ fn write_inner(node: &Arc<Node>, rt: &Arc<ShareRt>) -> std::io::Result<()> {
         "rejectedEvents": rejected.len(),
         "schemaErrors": rt.schemas.lock().errors.clone(),
         "waitingApproval": node.runner.waiting_for_share(&rt.id),
+        "efc": node.efc.space_view(&rt.id),
         "updated": time::format(&time::now()),
     });
     write_atomic(&dir.join("status.json"), &to_json(&status))?;

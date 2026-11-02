@@ -399,7 +399,7 @@ mod tests {
         let b = derive(&s, "pubB");
         assert_ne!(a.verifying_key(), b.verifying_key(), "разным издателям — разные ключи");
         assert_eq!(derive(&s, "pubA").verifying_key(), a.verifying_key(), "детерминированно");
-        let line = signed_line("guildpets", "pubA", "login", "2026-10-28T10:00:00Z", "{\"nonce\":\"x\"}");
+        let line = signed_line("mygame", "pubA", "login", "2026-10-28T10:00:00Z", "{\"nonce\":\"x\"}");
         let sig = b64(&a.sign(line.as_bytes()).to_bytes());
         assert!(verify(&b64(a.verifying_key().as_bytes()), line.as_bytes(), &sig));
         assert!(!verify(&b64(b.verifying_key().as_bytes()), line.as_bytes(), &sig));

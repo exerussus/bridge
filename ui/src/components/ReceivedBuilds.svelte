@@ -30,6 +30,11 @@
     if (v === null) return;
     try { await api('POST', 'builds/target', { peer: r.peer, name: r.name, path: v.trim() }); toast('Следующая сборка распакуется сюда', 'ok'); reload(); } catch (e: any) { toast(e.message, 'bad'); }
   }
+  async function setExe(r: any) {
+    const v = prompt('Что запускать в сборке «' + r.name + '»?\nПуть внутри папки сборки (Game.exe, bin/Game.exe) или полный путь к файлу в ней.\nПусто — как указал отправитель' + (r.exeSender ? ' (' + r.exeSender + ')' : '') + '.', r.exeOwn || r.exe || '');
+    if (v === null) return;
+    try { const x = await api('POST', 'builds/exe', { peer: r.peer, name: r.name, exe: v.trim() }); toast(x.exe ? 'Запуск: ' + x.exe : 'Как указал отправитель', 'ok'); reload(); } catch (e: any) { toast(e.message, 'bad'); }
+  }
   async function openDir(r: any) { try { await api('POST', 'open?' + new URLSearchParams({ target: 'build', peer: r.peer, name: r.name })); } catch (e: any) { toast(e.message, 'bad'); } }
   const last = (r: any) => r.lastOk || r;
 </script>
@@ -55,11 +60,12 @@
         {/if}
         <button class="b sm" onclick={() => openDir(r)}><Gi n="folder" /> Папка</button>
         <button class="b sm" onclick={() => setTarget(r)}>Куда…</button>
+        <button class="b sm" title="Какую программу запускать кнопкой «▶ Запустить» — запоминается" onclick={() => setExe(r)}>Что запускать…</button>
       </div>
     </div>
     {#if L.note}<div class="rbnote"><span class="plbl" style="margin:0">Что нового</span><div>{L.note}</div></div>{/if}
     {#if r.error}<div class="small" style="color:var(--warn);margin-top:6px">Последняя присланная не распаковалась: {r.error}</div>{/if}
-    <div class="small muted mono rbt">{r.target}{r.exe ? ' · запуск: ' + r.exe : ''}</div>
+    <div class="small muted mono rbt">{r.target}{r.exe ? ' · запуск: ' + r.exe + (r.exeOwn ? ' (своё)' : '') : ''}</div>
     {#if r.history.length > 1}
       <button class="b sm" style="margin-top:8px" onclick={() => (open[key(r)] = !open[key(r)])}>{open[key(r)] ? 'Скрыть историю' : 'История версий · ' + r.history.length}</button>
       {#if open[key(r)]}

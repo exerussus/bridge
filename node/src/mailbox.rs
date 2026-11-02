@@ -18,6 +18,8 @@ pub struct Mailbox {
     gate: tokio::sync::Mutex<()>,
     signature: Mutex<String>,
     blocked: Mutex<HashSet<String>>,
+    /// (3.11) Соседи без передачи пачкой (старая версия).
+    no_pack: Mutex<HashSet<String>>,
     pub wake: AtomicBool,
     pub dirty: AtomicBool,
 }
@@ -36,6 +38,7 @@ impl Mailbox {
             gate: tokio::sync::Mutex::new(()),
             signature: Mutex::new(String::new()),
             blocked: Mutex::new(HashSet::new()),
+            no_pack: Mutex::new(HashSet::new()),
             wake: AtomicBool::new(false),
             dirty: AtomicBool::new(true),
         }
@@ -122,13 +125,15 @@ impl Mailbox {
                 if path::is_junk(&p) || ig.is_ignored(&p) || !seen.insert(p.to_lowercase()) {
                     continue;
                 }
-                if now - w.mtime_ticks < settle {
+                // пустой файл ждёт дольше: его могли только создать, а писать будут позже (3.10)
+                if now - w.mtime_ticks < if w.size == 0 { settle * 5 } else { settle } {
                     continue;
                 }
                 let cached = self.sha_cache.lock().get(&w.full).filter(|c| c.0 == w.size && c.1 == w.mtime_ticks).map(|c| c.2.clone());
                 let sha = match cached {
                     Some(s) => s,
                     None => match path::sha256_file_settled(&w.full) {
+                        Ok(_) if std::fs::metadata(&w.full).map(|m| m.len() as i64 != w.size).unwrap_or(true) => continue, // менялся, пока читали
                         Ok(s) => {
                             self.sha_cache.lock().insert(w.full.clone(), (w.size, w.mtime_ticks, s.clone()));
                             s
@@ -206,6 +211,45 @@ impl Mailbox {
                     continue;
                 }
             };
+            // (3.11) мелкие файлы — одним архивом заранее; не вышло (старый сосед) — по одному, как раньше
+            let mut packed: HashMap<String, crate::pack::Got> = HashMap::new();
+            if !self.no_pack.lock().contains(&peer.name.to_lowercase()) {
+                let small: Vec<&FileEntry> = list
+                    .files
+                    .iter()
+                    .filter(|f| f.size <= crate::pack::MAX_ITEM && f.size <= node.max_file_bytes())
+                    .filter(|f| path::norm(&f.path).map(|p| !ig.is_ignored(&p)).unwrap_or(false))
+                    .collect();
+                if small.len() >= 2 {
+                    for chunk in small.chunks(crate::pack::MAX_FILES) {
+                        let want: HashMap<String, String> = chunk.iter().map(|f| (f.path.to_lowercase(), f.sha256.to_lowercase())).collect();
+                        let paths: Vec<String> = chunk.iter().map(|f| f.path.clone()).collect();
+                        let bytes: i64 = chunk.iter().map(|f| f.size).sum();
+                        let zip = node.tmp_file();
+                        let _g = crate::pack::TmpGuard(zip.clone());
+                        match client.mailbox_pack_get(&paths, &zip, bytes + bytes / 8 + 16 * 1024 * 1024, &format!("{} файлов архивом", paths.len())).await {
+                            Ok(_) => {
+                                let (n2, z2, w2) = (node.clone(), zip.clone(), want.clone());
+                                if let Ok(Ok(got)) = tokio::task::spawn_blocking(move || crate::pack::extract(&z2, &|p| w2.contains_key(&p.to_lowercase()), &|| n2.tmp_file(), crate::pack::MAX_ITEM)).await {
+                                    for (k, g) in got {
+                                        if want.get(&k).map(|s| s.eq_ignore_ascii_case(&g.sha)).unwrap_or(false) {
+                                            packed.insert(k, g);
+                                        } else {
+                                            let _ = std::fs::remove_file(&g.tmp);
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                if matches!(e.status(), Some(404) | Some(405)) {
+                                    self.no_pack.lock().insert(peer.name.to_lowercase());
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
             for f in list.files {
                 let Some(p) = path::norm(&f.path) else { continue };
                 if let Some(rule) = ig.which(&p) {
@@ -220,8 +264,13 @@ impl Mailbox {
                     let _ = client.mailbox_ack(&ack).await; // уже есть — просто подтвердить
                     continue;
                 }
-                let tmp = node.tmp_file();
-                match client.mailbox_download(&f.path, &tmp, node.max_file_bytes()).await {
+                let pre = packed.remove(&f.path.to_lowercase());
+                let tmp = pre.as_ref().map(|g| g.tmp.clone()).unwrap_or_else(|| node.tmp_file());
+                let got = match pre {
+                    Some(g) => Ok(g.sha),
+                    None => client.mailbox_download(&f.path, &tmp, node.max_file_bytes()).await,
+                };
+                match got {
                     Ok(sha) if sha.eq_ignore_ascii_case(&f.sha256) => {
                         if let Some(d) = dest.parent() {
                             let _ = std::fs::create_dir_all(d);
@@ -251,6 +300,9 @@ impl Mailbox {
                         }
                     }
                 }
+            }
+            for (_, g) in packed {
+                let _ = std::fs::remove_file(&g.tmp); // не понадобились (уже есть, в игноре)
             }
         }
     }

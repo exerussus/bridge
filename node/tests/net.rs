@@ -272,7 +272,7 @@ async fn command_waits_for_human_then_runs() {
     bridge_node::iface::write(net.n("stand"), &net.n("stand").share("s").unwrap());
     assert!(net.folder("stand").join("_bridge/inbox").join(format!("{}.json", id)).exists(), "команда во входящих");
     assert!(!net.act("dev", ba(json!({"action":"approve","record":id}))).ok, "отправитель сам не подтверждает");
-    assert!(net.act("stand", ba(json!({"action":"approve","record":id,"actor":"технолог"}))).ok);
+    assert!(net.act("stand", ba(json!({"action":"approve","record":id,"actor":"tester"}))).ok);
     assert_eq!(wait_status(&net, "dev", &id, &["done", "failed"]).await, "done");
     net.stop().await;
 }
@@ -818,10 +818,10 @@ async fn agent_auto_runs_claude_and_continues_session() {
     net.sync(1, &["dev", "stand"]).await;
     assert_eq!(net.n("dev").peer_state("stand").agent, "auto", "оркестратор видит агента соседа");
     let dev = net.n("dev").clone();
-    let t = bridge_node::agent::ask(&dev, "stand", "прогони тесты базиса", None, None).await.expect("поручено");
+    let t = bridge_node::agent::ask(&dev, "stand", "прогони тесты", None, None).await.expect("поручено");
     let t = agent_wait_status(&net, "dev", &t.id, &["idle", "failed"]).await;
     assert_eq!(t.status, "idle", "{}", t.error);
-    assert!(t.result.contains("Готово: прогони тесты базиса"), "{}", t.result);
+    assert!(t.result.contains("Готово: прогони тесты"), "{}", t.result);
     assert!(t.events.iter().any(|e| e.kind == "tool" && e.text.contains("run-tests")), "ход: инструменты видны оркестратору");
     assert!(t.cost > 0.0);
     let session = net.n("stand").agent.get(&t.id).unwrap().session;
@@ -1538,11 +1538,11 @@ async fn agent_local_self_task() {
     let r = net.act("stand", ba(json!({"action":"create","type":"task","fields":{"title":"Своя задача","assignee":"stand","agent":"stand"}})));
     assert!(r.ok, "{}", r.error);
     let rid = r.record.clone().unwrap();
-    let t = bridge_node::agent::ask_full(&stand, "local", "прогони тесты базиса", None, None, &json!({ "share": "s", "id": rid })).await.expect("поручено себе");
+    let t = bridge_node::agent::ask_full(&stand, "local", "прогони тесты", None, None, &json!({ "share": "s", "id": rid })).await.expect("поручено себе");
     assert!(t.local && t.role == "in");
     let t = agent_wait_status(&net, "stand", &t.id, &["idle", "failed"]).await;
     assert_eq!(t.status, "idle", "{}", t.error);
-    assert!(t.result.contains("Готово: прогони тесты базиса"), "{}", t.result);
+    assert!(t.result.contains("Готово: прогони тесты"), "{}", t.result);
     let session = t.session.clone();
     assert!(!session.is_empty());
     tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
@@ -1691,9 +1691,9 @@ async fn builds_patch_and_clean() {
         for _ in 0..100 { if p.exists() { return true; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
         false
     };
-    let target = stand.base_dir.join("сборки").join("CORA");
+    let target = stand.base_dir.join("сборки").join("Game");
     // первая — целиком, хоть и «патч»
-    bridge_node::builds::send(&dev, "stand", src.to_str().unwrap(), "CORA", "patch").unwrap();
+    bridge_node::builds::send(&dev, "stand", src.to_str().unwrap(), "Game", "patch").unwrap();
     wait("1").await;
     net.sync(1, &["stand"]).await;
     assert!(ready(target.join("Game_Data/Managed/Assembly.dll")).await, "распакована: {}", bridge_node::builds::status(&stand));
@@ -1701,7 +1701,7 @@ async fn builds_patch_and_clean() {
     // патч: только изменённый файл
     std::fs::write(src.join("Game_Data/Managed/Assembly.dll"), b"v2").unwrap();
     std::fs::write(target.join("local-note.txt"), b"my").unwrap();
-    bridge_node::builds::send(&dev, "stand", src.to_str().unwrap(), "CORA", "patch").unwrap();
+    bridge_node::builds::send(&dev, "stand", src.to_str().unwrap(), "Game", "patch").unwrap();
     wait("2").await;
     let st = bridge_node::builds::status(&dev);
     assert_eq!(st["history"][0]["files"], 1, "в патче один файл: {}", st);
@@ -1710,11 +1710,11 @@ async fn builds_patch_and_clean() {
     assert_eq!(std::fs::read(target.join("Game_Data/Managed/Assembly.dll")).unwrap(), b"v2");
     assert!(target.join("local-note.txt").exists(), "патч не трогает остальное");
     // пустой патч — понятная ошибка
-    bridge_node::builds::send(&dev, "stand", src.to_str().unwrap(), "CORA", "patch").unwrap();
+    bridge_node::builds::send(&dev, "stand", src.to_str().unwrap(), "Game", "patch").unwrap();
     for _ in 0..100 { if dev.builds.jobs.lock().is_empty() { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
     assert!(bridge_node::builds::status(&dev)["history"][0]["error"].as_str().unwrap_or("").contains("ничего не изменилось"));
     // чистая: лишнее уходит (в корзину), остаётся ровно присланное
-    bridge_node::builds::send(&dev, "stand", src.to_str().unwrap(), "CORA", "clean").unwrap();
+    bridge_node::builds::send(&dev, "stand", src.to_str().unwrap(), "Game", "clean").unwrap();
     wait("4").await;
     net.sync(1, &["stand"]).await;
     for _ in 0..100 { if !target.join("local-note.txt").exists() && target.join("Game.exe").exists() { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
@@ -1723,7 +1723,7 @@ async fn builds_patch_and_clean() {
     let h = bridge_node::builds::status(&stand);
     let old = h["history"][0]["old"].as_str().unwrap_or("").to_string();
     assert!(std::path::Path::new(&old).join("local-note.txt").exists(), "прежняя папка — в корзине: {}", h);
-    assert!(!stand.mailbox.in_root(&stand).join("dev").join(bridge_node::builds::DIR).join("CORA").exists(), "архивы убраны");
+    assert!(!stand.mailbox.in_root(&stand).join("dev").join(bridge_node::builds::DIR).join("Game").exists(), "архивы убраны");
     assert!(bridge_node::builds::send(&dev, "stand", src.to_str().unwrap(), "../x", "clean").is_err());
     net.stop().await;
 }
@@ -1747,24 +1747,28 @@ async fn build_presets_ignore() {
     let ign = json!(["# кэш", "Cache/", "*_BurstDebugInformation_DoNotShip/", "**/*.pdb", "!Keep.pdb"]);
     assert!(bridge_node::builds::set_presets(&dev, &json!([{ "id": "x", "name": "X", "path": "", "peers": [], "exe": "../evil.exe" }])).is_err(), "программа — только внутри сборки");
     assert!(bridge_node::builds::set_presets(&dev, &json!([{ "id": "bad id", "name": "X", "path": "", "peers": [] }])).is_err());
-    let l = bridge_node::builds::set_presets(&dev, &json!([{ "id": "cora", "name": "CORA2", "path": src.to_str().unwrap(), "peers": ["STAND"], "mode": "patch", "ignore": ign, "exe": "run.sh" }])).unwrap();
+    let l = bridge_node::builds::set_presets(&dev, &json!([{ "id": "game", "name": "Game2", "path": src.to_str().unwrap(), "peers": ["STAND"], "mode": "patch", "ignore": ign, "exe": "run.sh" }])).unwrap();
     assert_eq!(l[0]["exe"], "run.sh");
     assert_eq!(l[0]["peers"], json!(["stand"]), "имя соседа — как в настройках");
+    // (3.11) полный путь к программе внутри сборки — запоминается как путь от папки
+    let full_exe = src.join("run.sh").to_str().unwrap().to_string();
+    let l2 = bridge_node::builds::set_presets(&dev, &json!([{ "id": "game", "name": "Game2", "path": src.to_str().unwrap(), "peers": ["STAND"], "mode": "patch", "ignore": ign, "exe": full_exe }])).unwrap();
+    assert_eq!(l2[0]["exe"], "run.sh");
     let pv = bridge_node::builds::preview(&dev, src.to_str().unwrap(), &ign.as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_string()).collect::<Vec<_>>()).unwrap();
     assert_eq!(pv["files"], 4, "войдут exe, sh, dll и Keep.pdb: {}", pv);
     assert_eq!(pv["ignoredFiles"], 3, "{}", pv);
     assert_eq!(pv["exes"], json!(["Game.exe", "run.sh"]), "подсказка, что запускать: {}", pv);
     assert_eq!(pv["rules"][0]["rule"], "*_BurstDebugInformation_DoNotShip/", "крупнейшее правило первым: {}", pv);
-    let r = bridge_node::builds::send_preset(&dev, "cora", None, "  починил сохранения  ").unwrap();
+    let r = bridge_node::builds::send_preset(&dev, "game", None, "  починил сохранения  ").unwrap();
     assert_eq!(r["started"], json!(["stand"]));
     for _ in 0..100 { if dev.builds.jobs.lock().is_empty() && !bridge_node::builds::status(&dev)["history"].as_array().unwrap().is_empty() { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
     let h = bridge_node::builds::status(&dev)["history"][0].clone();
     assert_eq!(h["files"], 4, "{}", h);
     assert_eq!(h["skipped"], 3);
-    assert_eq!(h["preset"], "cora");
+    assert_eq!(h["preset"], "game");
     assert_eq!((h["n"].clone(), h["note"].clone()), (json!(1), json!("починил сохранения")));
     net.sync(1, &["stand"]).await;
-    let target = stand.base_dir.join("сборки").join("CORA2");
+    let target = stand.base_dir.join("сборки").join("Game2");
     for _ in 0..100 { if target.join("Game.exe").exists() { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
     assert!(target.join("Game_Data/Managed/Keep.pdb").exists());
     assert!(!target.join("Game_Data/Managed/A.pdb").exists());
@@ -1777,23 +1781,34 @@ async fn build_presets_ignore() {
     assert!(bridge_node::builds::run(&stand, "dev", "Нет такой").is_err());
     #[cfg(unix)]
     {
-        bridge_node::builds::run(&stand, "dev", "CORA2").unwrap();
+        bridge_node::builds::run(&stand, "dev", "Game2").unwrap();
         for _ in 0..50 { if target.join("ran.txt").exists() { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
         assert!(target.join("ran.txt").exists(), "программа сборки запустилась в её папке");
-        assert!(bridge_node::builds::running(&stand, "dev", "CORA2"));
-        assert_eq!(bridge_node::builds::run(&stand, "dev", "CORA2").unwrap()["already"], true);
-        bridge_node::builds::stop(&stand, "dev", "CORA2").unwrap();
-        assert!(!bridge_node::builds::running(&stand, "dev", "CORA2"));
+        assert!(bridge_node::builds::running(&stand, "dev", "Game2"));
+        assert_eq!(bridge_node::builds::run(&stand, "dev", "Game2").unwrap()["already"], true);
+        bridge_node::builds::stop(&stand, "dev", "Game2").unwrap();
+        assert!(!bridge_node::builds::running(&stand, "dev", "Game2"));
     }
     // вторая версия — №2, история у получателя
     std::fs::write(src.join("Game_Data/Managed/A.dll"), b"a2").unwrap();
-    bridge_node::builds::send_preset(&dev, "cora", None, "второй патч").unwrap();
+    bridge_node::builds::send_preset(&dev, "game", None, "второй патч").unwrap();
     for _ in 0..100 { if dev.builds.jobs.lock().is_empty() && bridge_node::builds::status(&dev)["history"][0]["n"] == 2 { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
     net.sync(1, &["stand"]).await;
     for _ in 0..100 { got = bridge_node::builds::status(&stand)["received"][0].clone(); if got["n"] == 2 { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
     assert_eq!((got["n"].clone(), got["note"].clone(), got["mode"].clone()), (json!(2), json!("второй патч"), json!("patch")), "{}", got);
     assert_eq!(got["history"].as_array().unwrap().len(), 2);
     assert_eq!(got["history"][1]["note"], "починил сохранения");
+    // (3.11) версия без программы не сбрасывает «что запускать»; своё — главнее
+    bridge_node::builds::send_full(&dev, "stand", src.to_str().unwrap(), "Game2", "patch", &[], "", "", "без exe").unwrap();
+    for _ in 0..100 { if dev.builds.jobs.lock().is_empty() && bridge_node::builds::status(&dev)["history"][0]["n"] == 3 { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    net.sync(1, &["stand"]).await;
+    for _ in 0..100 { got = bridge_node::builds::status(&stand)["received"][0].clone(); if got["n"] == 3 { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    assert_eq!((got["n"].clone(), got["exe"].clone()), (json!(3), json!("run.sh")), "{}", got);
+    assert_eq!(bridge_node::builds::set_exe(&stand, "dev", "Game2", "Game.exe").unwrap(), "Game.exe");
+    assert_eq!(bridge_node::builds::status(&stand)["received"][0]["exe"], "Game.exe");
+    assert!(bridge_node::builds::set_exe(&stand, "dev", "Game2", "/etc/passwd").is_err(), "только внутри папки сборки");
+    bridge_node::builds::set_exe(&stand, "dev", "Game2", "").unwrap();
+    assert_eq!(bridge_node::builds::status(&stand)["received"][0]["exe"], "run.sh");
     net.stop().await;
 }
 
@@ -1984,7 +1999,7 @@ async fn app_sessions_two_bridges() {
     }
     assert_eq!(last, 49);
     // общее состояние: клиент пишет — все видят
-    op(&mut b, serde_json::json!({ "op": "state", "ops": [{ "op": "set", "path": "score.urban", "value": 3 }] })).await;
+    op(&mut b, serde_json::json!({ "op": "state", "ops": [{ "op": "set", "path": "score.ann", "value": 3 }] })).await;
     let st = wait_ev(&mut a, "state").await;
     assert_eq!(st["ops"][0]["value"], 3);
     assert_eq!(st["by"], 1);
@@ -2011,7 +2026,7 @@ async fn app_sessions_two_bridges() {
     tokio::time::sleep(std::time::Duration::from_millis(3500)).await;
     let jb2 = op(&mut b, serde_json::json!({ "op": "join", "sid": ja["sid"] })).await;
     assert_eq!(jb2["sid"], ja["sid"]);
-    assert_eq!(jb2["state"]["score"]["urban"], 3, "новичок получил общее состояние");
+    assert_eq!(jb2["state"]["score"]["ann"], 3, "новичок получил общее состояние");
     a.close(None).await.unwrap();
     let end = wait_ev(&mut b, "ended").await;
     assert!(end["why"].as_str().unwrap().contains("хост"), "{}", end);
@@ -2026,19 +2041,19 @@ async fn shared_folder_plan() {
     put(&own(&net, "obshee", "a.txt"), "хозяин");
     net.sync(1, &["stand"]).await;
     let stand = net.n("stand").clone();
-    let p = stand.folders.plan(&stand, "dev", "obshee").await.unwrap();
+    let p = stand.folders.plan(&stand, "dev", "obshee", "").await.unwrap();
     assert_eq!(p["total"], 0, "всё сошлось: {}", p);
     put(&own(&net, "obshee", "новое/b.bin"), &"x".repeat(5000));
     put(&mnt(&net, "obshee", "моё.txt"), "сосед");
-    let p = stand.folders.plan(&stand, "dev", "obshee").await.unwrap();
+    let p = stand.folders.plan(&stand, "dev", "obshee", "").await.unwrap();
     let acts: Vec<(String, String)> = p["items"].as_array().unwrap().iter().map(|i| (i["path"].as_str().unwrap().to_string(), i["act"].as_str().unwrap().to_string())).collect();
     assert!(acts.contains(&("новое/b.bin".into(), "download".into())), "{:?}", acts);
     assert!(acts.contains(&("моё.txt".into(), "upload".into())), "{:?}", acts);
     assert_eq!(p["down"], 5000);
     net.sync(1, &["stand"]).await;
-    let p = stand.folders.plan(&stand, "dev", "obshee").await.unwrap();
+    let p = stand.folders.plan(&stand, "dev", "obshee", "").await.unwrap();
     assert_eq!(p["total"], 0, "после обмена — пусто: {}", p);
-    assert_eq!(stand.folders.plan(&stand, "dev", "нет").await.err().unwrap().0, 404);
+    assert_eq!(stand.folders.plan(&stand, "dev", "нет", "").await.err().unwrap().0, 404);
     net.stop().await;
 }
 
@@ -2062,12 +2077,12 @@ async fn tile_status_presets() {
     assert_eq!(t["style"]["stText"], "собираю билд");
     assert_eq!(tile::st_img_of_peer(&stand, "dev").await.unwrap(), gif, "значок заготовки у соседа");
     // правка выбранной заготовки — сразу в статусе
-    tile::set_presets(&dev, &json!({ "list": [{ "id": "s1", "text": "на созвоне", "color": "#ff4f64" }, { "id": "s2", "text": "собираю билд CORA", "color": "" }] })).unwrap();
-    assert_eq!(tile::own_style(&dev)["stText"], "собираю билд CORA");
+    tile::set_presets(&dev, &json!({ "list": [{ "id": "s1", "text": "на созвоне", "color": "#ff4f64" }, { "id": "s2", "text": "собираю билд", "color": "" }] })).unwrap();
+    assert_eq!(tile::own_style(&dev)["stText"], "собираю билд");
     tile::apply_preset(&dev, "s1").unwrap();
     assert_eq!((tile::own_style(&dev)["stColor"].as_str(), tile::own_st_img(&dev).is_none()), (Some("#FF4F64"), true));
     // тишина
-    tile::set_presets(&dev, &json!({ "list": [{ "id": "s1", "text": "на созвоне", "color": "#ff4f64", "silent": true }, { "id": "s2", "text": "собираю билд CORA", "color": "" }] })).unwrap();
+    tile::set_presets(&dev, &json!({ "list": [{ "id": "s1", "text": "на созвоне", "color": "#ff4f64", "silent": true }, { "id": "s2", "text": "собираю билд", "color": "" }] })).unwrap();
     assert!(tile::silent(&dev), "выбрана s1 с тишиной");
     net.sync(1, &["stand", "dev"]).await;
     assert_eq!(tile::of_peer(&stand, "dev").await.unwrap()["style"]["stSilent"], true, "сосед знает про тишину");
@@ -2361,5 +2376,117 @@ async fn app_settings_trust_and_autostart() {
     apps::settings(&dev, "printer", &serde_json::json!({ "autostart": { "service": false } })).unwrap();
     apps::revoke(&dev, "printer").unwrap();
     assert!(apps::settings(&dev, "printer", &serde_json::json!({ "trust": true })).is_err(), "без разрешения настройки не меняются");
+    net.stop().await;
+}
+
+/// 3.10: перед перезапуском после обновления мост запоминает канал; панель забирает его один раз.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejoin_after_update() {
+    use bridge_node::{net as anet, update};
+    let mut net = pair();
+    net.start().await;
+    let dev = net.n("dev").clone();
+    update::save_rejoin(&dev); // не в канале — нечего запоминать
+    assert!(!update::rejoin_pending(&dev));
+    anet::set_channel(&dev, "dev:obshiy", "Общий", vec!["stand".into()]);
+    update::save_rejoin(&dev);
+    assert!(update::rejoin_pending(&dev));
+    let v = update::take_rejoin(&dev).expect("канал");
+    assert_eq!(v["room"], "dev:obshiy");
+    assert!(update::take_rejoin(&dev).is_none());
+    net.stop().await;
+}
+
+/// 3.11: жёсткая сверка — «главная моя» у соседа, «как у хозяина», «главная моя» у хозяина.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shared_folder_force_sync() {
+    let mut net = folder_net();
+    net.start().await;
+    let (dev, stand) = (net.n("dev").clone(), net.n("stand").clone());
+    put(&own(&net, "obshee", "a.txt"), "A");
+    put(&own(&net, "obshee", "b.txt"), "B");
+    net.sync(1, &["stand"]).await;
+    assert_eq!(std::fs::read_to_string(mnt(&net, "obshee", "a.txt")).unwrap(), "A");
+    // обе стороны правят a.txt; сосед удаляет b и добавляет c — главная его копия
+    put(&own(&net, "obshee", "a.txt"), "хозяин");
+    put(&mnt(&net, "obshee", "a.txt"), "сосед");
+    std::fs::remove_file(mnt(&net, "obshee", "b.txt")).unwrap();
+    put(&mnt(&net, "obshee", "c.txt"), "C");
+    let pl = stand.folders.plan(&stand, "dev", "obshee", "push").await.unwrap();
+    assert_eq!(pl["total"], 3, "{}", pl);
+    stand.folders.mount_force("dev", "obshee", "push").unwrap();
+    net.sync(1, &["stand"]).await;
+    assert_eq!(std::fs::read_to_string(own(&net, "obshee", "a.txt")).unwrap(), "сосед", "у хозяина — как у соседа");
+    assert!(!own(&net, "obshee", "b.txt").exists());
+    assert_eq!(std::fs::read_to_string(own(&net, "obshee", "c.txt")).unwrap(), "C");
+    assert!(stand.folders.find_mount("dev", "obshee").unwrap().force.is_empty(), "флажок снят");
+    // «как у хозяина»: своя правка и лишний файл — в корзину
+    put(&own(&net, "obshee", "a.txt"), "хозяин 2");
+    put(&mnt(&net, "obshee", "a.txt"), "сосед 2");
+    put(&mnt(&net, "obshee", "d.txt"), "D");
+    stand.folders.mount_force("dev", "obshee", "take").unwrap();
+    net.sync(1, &["stand"]).await;
+    assert_eq!(std::fs::read_to_string(mnt(&net, "obshee", "a.txt")).unwrap(), "хозяин 2");
+    assert!(!mnt(&net, "obshee", "d.txt").exists());
+    assert!(stand.folders.trash_list().iter().any(|t| t["path"] == "d.txt"), "лишнее — в корзине");
+    // хозяин: «главная моя» — сосед берёт её при следующем обмене
+    put(&mnt(&net, "obshee", "e.txt"), "E");
+    put(&mnt(&net, "obshee", "c.txt"), "C2");
+    dev.folders.own_force(&dev, "obshee").unwrap();
+    net.sync(1, &["stand"]).await;
+    assert!(!mnt(&net, "obshee", "e.txt").exists() && !own(&net, "obshee", "e.txt").exists(), "новый файл соседа убран");
+    assert_eq!(std::fs::read_to_string(mnt(&net, "obshee", "c.txt")).unwrap(), "C");
+    // метка исполнена — дальше обычный обмен
+    put(&mnt(&net, "obshee", "f.txt"), "F");
+    net.sync(1, &["stand"]).await;
+    assert_eq!(std::fs::read_to_string(own(&net, "obshee", "f.txt")).unwrap(), "F");
+    net.stop().await;
+}
+
+/// 3.11: много мелких файлов — архивом в обе стороны (общая папка) и в «Отправке».
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn transfers_go_as_pack() {
+    let mut net = folder_net();
+    net.start().await;
+    for i in 0..30 {
+        put(&own(&net, "obshee", &format!("код/f{}.cs", i)), &format!("class F{} {{ }}\n", i).repeat(50));
+    }
+    net.sync(1, &["stand"]).await;
+    for i in 0..30 {
+        assert_eq!(std::fs::read_to_string(mnt(&net, "obshee", &format!("код/f{}.cs", i))).unwrap(), format!("class F{} {{ }}\n", i).repeat(50));
+    }
+    assert!(net.logs.lock().iter().any(|l| l.contains("получено архивом: 30")), "скачано архивом: {:?}", net.logs.lock().iter().filter(|l| l.contains("архив")).collect::<Vec<_>>());
+    for i in 0..20 {
+        put(&mnt(&net, "obshee", &format!("правки/p{}.txt", i)), &format!("правка {}", i));
+    }
+    put(&mnt(&net, "obshee", "код/f1.cs"), "изменено соседом");
+    net.sync(1, &["stand"]).await;
+    for i in 0..20 {
+        assert_eq!(std::fs::read_to_string(own(&net, "obshee", &format!("правки/p{}.txt", i))).unwrap(), format!("правка {}", i));
+    }
+    assert_eq!(std::fs::read_to_string(own(&net, "obshee", "код/f1.cs")).unwrap(), "изменено соседом");
+    assert!(net.logs.lock().iter().any(|l| l.contains("stand прислал архивом 21")), "отправлено архивом: {:?}", net.logs.lock().iter().filter(|l| l.contains("архив")).collect::<Vec<_>>());
+    // следующий обмен ничего не гоняет: базы сошлись
+    let pl = net.n("stand").folders.plan(net.n("stand"), "dev", "obshee", "").await.unwrap();
+    assert_eq!(pl["total"], 0, "{}", pl);
+    // «Отправка»
+    let out = net.root.join("dev/отправка/stand/пачка");
+    for i in 0..10 {
+        put(&out.join(format!("{}.txt", i)), &i.to_string());
+    }
+    net.sync(1, &["stand", "dev"]).await;
+    for i in 0..10 {
+        assert_eq!(std::fs::read_to_string(net.root.join(format!("stand/приём/dev/пачка/{}.txt", i))).unwrap(), i.to_string());
+    }
+    assert!(!out.exists() || std::fs::read_dir(&out).unwrap().next().is_none(), "подтверждено и убрано у отправителя");
+    // пространство
+    for i in 0..5 {
+        net.write("dev", &format!("задания/z{}.md", i), &format!("задание {}", i));
+    }
+    net.sync(2, &["dev", "stand"]).await;
+    for i in 0..5 {
+        assert_eq!(net.read("stand", &format!("задания/z{}.md", i)).as_deref(), Some(format!("задание {}", i).as_str()));
+    }
+    assert!(net.logs.lock().iter().any(|l| l.contains("получено архивом: 5")), "пространство — архивом");
     net.stop().await;
 }

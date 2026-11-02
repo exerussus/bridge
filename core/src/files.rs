@@ -281,7 +281,13 @@ pub fn move_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
         Err(_) => {
-            std::fs::copy(from, to)?;
+            // Перенос не удался (другой диск, файл занят) — копия. Источник удаляем, только если копия полная (3.10).
+            let want = std::fs::metadata(from)?.len();
+            let n = std::fs::copy(from, to)?;
+            let got = std::fs::metadata(to).map(|m| m.len()).unwrap_or(0);
+            if n != want || got != want {
+                return Err(std::io::Error::other(format!("копия неполная: {} из {} байт", got, want)));
+            }
             let _ = std::fs::remove_file(from);
             Ok(())
         }

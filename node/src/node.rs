@@ -130,6 +130,8 @@ pub struct Node {
     pub started: Time,
     pub peers: Mutex<BTreeMap<String, PeerState>>,
     pub shares: RwLock<Vec<Arc<ShareRt>>>,
+    /// Файловые каналы efc/1: пространства и канал агента.
+    pub efc: crate::efc_chan::Channels,
     pub strangers: Mutex<BTreeMap<String, StrangerInfo>>,
     pub nonces: NonceCache,
     clients: Mutex<HashMap<String, (String, Arc<PeerClient>)>>,
@@ -195,6 +197,7 @@ impl Node {
         }
         let data_dir = base_dir.join(&cfg.data_dir);
         std::fs::create_dir_all(&data_dir).map_err(|e| format!("Папка данных {}: {}", data_dir.display(), e))?;
+        crate::pack::clean_tmp(&data_dir.join("tmp"));
         let token = load_or_create_token(&data_dir);
         let (log_tx, _) = broadcast::channel(256);
         let (events_tx, _) = broadcast::channel(256);
@@ -214,6 +217,7 @@ impl Node {
             started: time::now(),
             peers: Mutex::new(BTreeMap::new()),
             shares: RwLock::new(Vec::new()),
+            efc: Default::default(),
             strangers: Mutex::new(BTreeMap::new()),
             nonces: NonceCache::default(),
             clients: Mutex::new(HashMap::new()),
@@ -539,6 +543,7 @@ impl Node {
             self.folders.own_dirty.store(true, Ordering::SeqCst);
             self.folders.mounts_dirty.store(true, Ordering::SeqCst);
         }
+        crate::efc_chan::sync(self);
         for rt in self.shares() {
             crate::iface::process_outbox(self, &rt);
         }
@@ -608,6 +613,7 @@ impl Node {
     pub async fn stop(&self) {
         self.shutdown.cancel();
         self.runner.stop_all().await;
+        self.efc.stop_all();
         for rt in self.shares() {
             rt.save_state(self);
         }
