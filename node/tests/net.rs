@@ -369,6 +369,29 @@ async fn file_interface_outbox_to_inbox() {
 
 // ───────────────────────── Ручная отправка ─────────────────────────
 
+/// 3.19.1: пустой файл (его только создали — копирование по сети ещё идёт) не уходит, даже если время у него «старое»
+/// (Windows при копировании ставит время источника); как только пришло содержимое — уходит целиком.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mailbox_waits_for_empty_file() {
+    let mut net = pair();
+    net.start().await;
+    let f = net.root.join("dev/outbox/stand/видео.mp4");
+    std::fs::write(&f, b"").unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::OpenOptions::new().write(true).open(&f).unwrap().set_modified(old).unwrap();
+    net.sync(2, &["stand", "dev"]).await;
+    let got = net.root.join("stand/inbox/dev/видео.mp4");
+    assert!(!got.exists(), "пустой не ушёл");
+    assert!(f.exists(), "у отправителя ждёт");
+    assert!(net.n("dev").mailbox.waiting.load(std::sync::atomic::Ordering::SeqCst), "мост знает, что файл ждёт");
+    std::fs::write(&f, vec![7u8; 500_000]).unwrap();
+    std::fs::OpenOptions::new().write(true).open(&f).unwrap().set_modified(old).unwrap();
+    net.sync(1, &["stand", "dev"]).await;
+    assert_eq!(std::fs::metadata(&got).unwrap().len(), 500_000, "дошёл целиком");
+    assert!(!f.exists(), "после подтверждения удалён");
+    net.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mailbox_send_receive_ack_delete() {
     let mut net = pair();

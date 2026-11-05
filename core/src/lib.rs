@@ -9,6 +9,8 @@ pub mod path;
 pub mod proto;
 pub mod records;
 pub mod reducer;
+pub mod mostnet;
+pub mod relay;
 pub mod scanner;
 pub mod schemas;
 pub mod signing;

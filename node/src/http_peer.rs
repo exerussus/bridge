@@ -240,6 +240,7 @@ async fn peer_gate(node: Arc<Node>, ip: Option<IpAddr>, req: Request, next: Next
         s.inbound_error.clear();
         s.inbound_legacy = parsed.kid.is_empty();
     });
+    node.mark_ip(&name, &ip_text);
     let mut req = Request::from_parts(parts, if stream { pass_body } else { Body::from(bytes.clone()) });
     req.extensions_mut().insert(PeerCtx { name, body: bytes });
     next.run(req).await
@@ -458,8 +459,16 @@ async fn hello(State(node): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, Quer
     };
     let turn = node.turn.running().then(|| {
         let (username, credential) = node.turn.creds(&pc.name, std::time::Duration::from_secs(24 * 3600));
-        TurnInfo { port: node.turn.port.load(Ordering::SeqCst), username, credential }
+        TurnInfo { port: node.turn.port.load(Ordering::SeqCst), username, credential, tcp: node.turn.tcp.load(Ordering::SeqCst) }
     });
+    let relay = {
+        let rc = node.cfg.read().relay.clone();
+        if rc.share {
+            node.relay.info(&rc)
+        } else {
+            None
+        }
+    };
     let runners: Vec<RunnerInfo> = {
         let c = node.cfg.read();
         c.runners
@@ -476,6 +485,7 @@ async fn hello(State(node): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, Quer
         assistant: crate::assistant::hello_info(&node, &pc.name),
         runners,
         turn,
+        relay,
         channels,
         agent,
         node: node.node_name(),
@@ -483,6 +493,7 @@ async fn hello(State(node): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, Quer
         status: Some(node.status()),
         you: Some(PeerView { name: pc.name.clone(), online: ps.online, last_seen: ps.last_seen, error: ps.error, url: node.cfg.read().peer(&pc.name).map(|p| p.url.clone()).unwrap_or_default() }),
         revs,
+        bulk: node.bulk_wanted(),
         ..Default::default()
     })
 }

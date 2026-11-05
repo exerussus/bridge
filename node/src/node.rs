@@ -58,6 +58,16 @@ pub struct PeerState {
     /// Ретранслятор голоса соседа для нас (из его привета).
     #[serde(skip)]
     pub turn: Option<bridge_core::proto::TurnInfo>,
+    /// Свой сервер соседа, которым он делится (3.16).
+    pub relay: Option<bridge_core::relay::RelayInfo>,
+    /// Через какой адрес сейчас связь (с 3.19.2 — всегда; `via_main` — это основной адрес).
+    pub via: String,
+    pub via_main: bool,
+    /// Через какой адрес идут файлы, если через сервер (3.19).
+    pub files_via: String,
+    /// Сосед просит гонять файлы через сервер (его галочка, 3.19).
+    #[serde(skip)]
+    pub wants_bulk: bool,
     /// Ассистент живёт у соседа (из его привета).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assistant: Option<bridge_core::proto::AssistantInfo>,
@@ -135,6 +145,15 @@ pub struct Node {
     pub strangers: Mutex<BTreeMap<String, StrangerInfo>>,
     pub nonces: NonceCache,
     clients: Mutex<HashMap<String, (String, Arc<PeerClient>)>>,
+    /// Каким адресом соседа сейчас пользуемся, если не основным (3.17.1: основной не отвечает — запасной).
+    active_url: Mutex<HashMap<String, String>>,
+    /// Когда последний раз проверяли, не ожил ли основной адрес.
+    primary_try: Mutex<HashMap<String, Instant>>,
+    /// Какую дату использования уже записали для (сосед, адрес) — чтобы писать bridge.json не чаще раза в сутки.
+    ip_marked: Mutex<HashMap<(String, String), String>>,
+    /// Своя сеть на этом ПК работает (служба most-net отвечает «on») — можно гнать файлы через сервер.
+    pub mostnet_up: std::sync::atomic::AtomicBool,
+    last_ip_prune: Mutex<Option<Instant>>,
     once: Mutex<HashMap<String, Instant>>,
     pub mailbox: Mailbox,
     pub builds: crate::builds::Builds,
@@ -150,6 +169,8 @@ pub struct Node {
     pub mobile: crate::mobile::Mobile,
     /// Ретранслятор голоса (TURN).
     pub turn: crate::turn::Turn,
+    /// Свой сервер-ретранслятор (most-relay): ключ с сервера и состояние.
+    pub relay: crate::relay::Relay,
     /// Ассистент: очередь входящих (на хозяине) и чат панели.
     pub assistant: crate::assistant::Assistant,
     /// Чаты: личные и каналов (сутки).
@@ -223,6 +244,11 @@ impl Node {
             strangers: Mutex::new(BTreeMap::new()),
             nonces: NonceCache::default(),
             clients: Mutex::new(HashMap::new()),
+            active_url: Mutex::new(HashMap::new()),
+            primary_try: Mutex::new(HashMap::new()),
+            ip_marked: Mutex::new(HashMap::new()),
+            mostnet_up: std::sync::atomic::AtomicBool::new(false),
+            last_ip_prune: Mutex::new(None),
             once: Mutex::new(HashMap::new()),
             mailbox: Mailbox::new(),
             builds: Default::default(),
@@ -236,6 +262,7 @@ impl Node {
             media: Media::new(),
             mobile: Default::default(),
             turn: Default::default(),
+            relay: Default::default(),
             assistant: Default::default(),
             chat: Default::default(),
             updates: Default::default(),
@@ -302,6 +329,8 @@ impl Node {
         crate::http_peer::start_http(&node).await?;
         node.turn.load(&node);
         crate::turn::bind_all(&node).await;
+        crate::relay::schedule(&node);
+        crate::mostnet::schedule(&node);
         node.runner.recover(&node);
         *node.watcher.lock() = Watcher::start(&node);
         let n2 = node.clone();
@@ -440,16 +469,167 @@ impl Node {
 
     // ───────────── Клиенты соседей ─────────────
 
+    /// Все адреса соседа по порядку: основной, запасной из настроек, его адреса в своей сети (10.77.x.y) из привета.
+    pub fn peer_urls(&self, peer: &PeerConfig) -> Vec<String> {
+        let mut v: Vec<String> = Vec::new();
+        if !peer.url.is_empty() {
+            v.push(peer.url.trim_end_matches('/').to_string());
+        }
+        let port = bridge_core::config::parse_url(&peer.url).map(|(_, p)| p).unwrap_or(5390);
+        if !peer.alt.trim().is_empty() {
+            if let Ok((h, p)) = bridge_core::config::parse_address(peer.alt.trim().trim_start_matches("http://").trim_end_matches('/'), port) {
+                v.push(format!("http://{}:{}", h, p));
+            }
+        }
+        for ip in &peer.ips {
+            if let Ok(a) = ip.parse::<std::net::Ipv4Addr>() {
+                if bridge_core::mostnet::in_net(a) {
+                    v.push(format!("http://{}:{}", a, port));
+                }
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        v.retain(|u| seen.insert(u.clone()));
+        v
+    }
+
+    /// Адрес соседа, которым сейчас пользуемся (основной, пока не переключились на запасной).
+    pub fn peer_url(&self, peer: &PeerConfig) -> String {
+        let cur = self.active_url.lock().get(&peer.name).cloned();
+        match cur {
+            Some(u) if self.peer_urls(peer).contains(&u) => u,
+            _ => peer.url.clone(),
+        }
+    }
+
+    /// Пользоваться другим адресом соседа (None — основным).
+    pub fn set_peer_url(&self, name: &str, url: Option<String>) {
+        match url {
+            Some(u) => self.active_url.lock().insert(name.to_string(), u),
+            None => self.active_url.lock().remove(name),
+        };
+        self.forget_client(name);
+    }
+
+    /// Пора ли снова попробовать основной адрес (раз в 2 минуты, пока работаем через запасной).
+    pub fn primary_due(&self, name: &str) -> bool {
+        let mut g = self.primary_try.lock();
+        let due = g.get(name).map(|t| t.elapsed() > Duration::from_secs(120)).unwrap_or(true);
+        if due {
+            g.insert(name.to_string(), Instant::now());
+        }
+        due
+    }
+
+    /// Адрес соседа использован (пришёл подписанный запрос или мы по нему достучались): дата — в `ip_seen`.
+    pub fn mark_ip(&self, peer: &str, ip: &str) {
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        {
+            let mut g = self.ip_marked.lock();
+            let k = (peer.to_string(), ip.to_string());
+            if g.get(&k) == Some(&today) {
+                return;
+            }
+            g.insert(k, today.clone());
+        }
+        let changed = {
+            let _g = self.config_lock.lock();
+            let mut c = self.cfg.write();
+            match c.peer_mut(peer) {
+                Some(p) if p.ips.iter().any(|x| x == ip) && p.ip_seen.get(ip) != Some(&today) => {
+                    p.ip_seen.insert(ip.to_string(), today);
+                    true
+                }
+                _ => false,
+            }
+        };
+        if changed {
+            self.save_config();
+        }
+    }
+
+    /// Раз в час: убрать дополнительные адреса соседей, не использованные больше 3 дней.
+    pub fn prune_peer_ips(&self) {
+        {
+            let mut g = self.last_ip_prune.lock();
+            if g.map(|t| t.elapsed() < Duration::from_secs(3600)).unwrap_or(false) {
+                return;
+            }
+            *g = Some(Instant::now());
+        }
+        let today = chrono::Utc::now().date_naive();
+        let mut log: Vec<String> = Vec::new();
+        let changed = {
+            let _g = self.config_lock.lock();
+            let mut c = self.cfg.write();
+            let mut changed = false;
+            for p in c.peers.iter_mut() {
+                let before = (p.ips.clone(), p.ip_seen.clone());
+                let gone = p.prune_ips(today);
+                if !gone.is_empty() {
+                    log.push(format!("Сосед «{}»: убраны адреса {} — не использовались больше {} дней", p.name, gone.join(", "), bridge_core::config::IP_KEEP_DAYS));
+                }
+                changed |= before != (p.ips.clone(), p.ip_seen.clone());
+            }
+            changed
+        };
+        if changed {
+            self.save_config();
+        }
+        for l in log {
+            self.info(&l);
+        }
+    }
+
+    /// Адрес соседа для файлов (3.19): включено «Файлы через сервер», сервер разрешает, своя сеть здесь работает,
+    /// а у соседа есть адрес в своей сети — файлы идут по нему (через сервер). Иначе — None (как обычно).
+    /// Своя сеть поднята и сервер разрешает файлы (без учёта галочки).
+    pub fn bulk_ready(&self) -> bool {
+        let rc = self.cfg.read().relay.clone();
+        if !rc.net || rc.mode == "off" || !rc.configured() || !self.mostnet_up.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        let st = self.relay.status.lock();
+        st.ok && st.files_allowed
+    }
+
+    /// Своя галочка «файлы через сервер» и всё готово — сообщаем соседям в привете.
+    pub fn bulk_wanted(&self) -> bool {
+        self.cfg.read().relay.files && self.bulk_ready()
+    }
+
+    pub fn bulk_url(&self, peer: &PeerConfig) -> Option<String> {
+        let mine = self.cfg.read().relay.files;
+        // через сервер — если так хочу я или сосед (у файла два конца, решает любой)
+        if !(mine || self.peer_state(&peer.name).wants_bulk) || !self.bulk_ready() {
+            return None;
+        }
+        let port = bridge_core::config::parse_url(&peer.url).map(|(_, p)| p).unwrap_or(5390);
+        let ip = peer.ips.iter().find(|i| i.parse::<std::net::Ipv4Addr>().map(bridge_core::mostnet::in_net).unwrap_or(false))?;
+        let u = format!("http://{}:{}", ip, port);
+        (u != self.peer_url(peer)).then_some(u)
+    }
+
+    /// Клиент к соседу по конкретному адресу (для проверки запасного) — не кешируется.
+    pub fn client_at(&self, peer: &PeerConfig, url: &str) -> PeerClient {
+        let mut q = peer.clone();
+        q.url = url.to_string();
+        PeerClient::new(&self.node_name(), &q, &self.announce_urls(), Duration::from_secs(30))
+    }
+
     /// Клиент к соседу — один на соседа (соединения переиспользуются). Пересоздаётся при смене адреса или ключа.
     pub fn client_for(&self, peer: &PeerConfig) -> Arc<PeerClient> {
-        let key = format!("{}|{}", peer.url, peer.secret);
+        let mut q = peer.clone();
+        q.url = self.peer_url(peer);
+        let bulk = self.bulk_url(peer);
+        let key = format!("{}|{}|{}", q.url, q.secret, bulk.as_deref().unwrap_or(""));
         let mut g = self.clients.lock();
         if let Some((k, c)) = g.get(&peer.name) {
             if *k == key {
                 return c.clone();
             }
         }
-        let c = Arc::new(PeerClient::new(&self.node_name(), peer, &self.announce_urls(), Duration::from_secs(30 * 60)).with_progress(self.transfers.clone(), self.limits.clone()));
+        let c = Arc::new(PeerClient::new(&self.node_name(), &q, &self.announce_urls(), Duration::from_secs(30 * 60)).with_progress(self.transfers.clone(), self.limits.clone()).with_bulk(bulk));
         g.insert(peer.name.clone(), (key, c.clone()));
         c
     }
@@ -534,6 +714,7 @@ impl Node {
         if check_binds {
             crate::http_peer::bind_auto(self).await;
             crate::turn::bind_all(self).await;
+            self.prune_peer_ips();
         }
         // Страховка от пропущенных событий файловой системы (сетевые диски и т. п.): полный просмотр раз в 5 минут
         let full_scan = {
@@ -573,7 +754,7 @@ impl Node {
                 crate::iface::write(self, &rt);
             }
         }
-        if quiet && self.mailbox.dirty.swap(false, Ordering::SeqCst) && self.mailbox.outgoing_changed(self) {
+        if quiet && (self.mailbox.dirty.swap(false, Ordering::SeqCst) || self.mailbox.waiting.load(Ordering::SeqCst)) && self.mailbox.outgoing_changed(self) {
             self.notify_all("mailbox");
         }
         if due || requested || self.mailbox.wake.swap(false, Ordering::SeqCst) {

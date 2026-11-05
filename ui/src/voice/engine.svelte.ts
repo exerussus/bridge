@@ -94,7 +94,7 @@ export function broadcastState() {
 export function stateChanged() { clearTimeout(stateT); stateT = setTimeout(() => { broadcastState(); bump(); }, 150); bump(); }
 setInterval(() => { if (R.key) broadcastState(); bump(); }, 5000);
 
-async function loadIce() { try { const r = await api('GET', 'media/ice'); RTC_CFG.iceServers = r.iceServers || []; } catch {} }
+async function loadIce() { try { const r = await api('GET', 'media/ice'); RTC_CFG.iceServers = r.iceServers || []; RTC_CFG.iceTransportPolicy = r.iceTransportPolicy === 'relay' ? 'relay' : 'all'; } catch {} }
 setInterval(loadIce, 300000);
 
 export async function loadChannels() {

@@ -1,0 +1,19 @@
+[package]
+name = "bridge-turn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TURN (RFC 5766) для моста и своего сервера most-relay"
+
+[dependencies]
+tokio.workspace = true
+tokio-util.workspace = true
+parking_lot.workspace = true
+chrono.workspace = true
+hex.workspace = true
+rand.workspace = true
+hmac.workspace = true
+base64.workspace = true
+sha1 = "0.10"
+md-5 = "0.10"
+crc32fast = "1"

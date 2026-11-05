@@ -1,0 +1,31 @@
+[package]
+name = "most-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Своя локальная сеть Моста (MostNet): адаптер, шифрование от ПК до ПК, пересылка через свой сервер"
+
+[[bin]]
+name = "most-net"
+path = "src/main.rs"
+
+[dependencies]
+bridge-core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+parking_lot.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+axum.workspace = true
+reqwest.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+rand.workspace = true
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+wintun = "0.5"

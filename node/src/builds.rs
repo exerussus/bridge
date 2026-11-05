@@ -585,6 +585,7 @@ fn pack(node: &Arc<Node>, peer: &str, src: &Path, name: &str, mode: &str, key: &
     }
     bridge_core::files::move_replace(&tmp, &out).map_err(|e| e.to_string())?;
     bridge_core::files::set_mtime(&out, &(time::now() - chrono::Duration::seconds(5)));
+    node.mailbox.mark_ready(&out);
     // отпечатки — «что у соседа» после этой отправки
     write(&sf, &json!({ "files": now, "at": time::format(&time::now()), "n": n }));
     Ok(json!({ "dir": "out", "peer": peer, "name": name, "mode": if first && mode == "patch" { "clean" } else { mode }, "at": time::format(&time::now()), "files": pick.len(), "all": now.len(), "bytes": bytes, "zip": zsize, "src": src.display().to_string(), "first": first, "skipped": skipped, "exe": exe, "note": note, "n": n }))

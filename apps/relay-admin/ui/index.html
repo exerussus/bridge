@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Сервер</title>
+<link rel="stylesheet" href="vendor/xterm.css">
+<style>
+  :root { --bg: #0B0C1A; --panel: #12132A; --line: rgba(255,255,255,.12); --text: #E8EAFB; --muted: #9DA1C7; --acc: #38E1F0; --ok: #3ddc84; --bad: #ff5c7a; --warn: #ffb547; }
+  body.light { --bg: #F6F7FC; --panel: #FFFFFF; --line: rgba(0,0,0,.12); --text: #14152B; --muted: #555a7a; --acc: #0a9fb0; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; font: 14px system-ui, sans-serif; background: var(--bg); color: var(--text); display: flex; flex-direction: column; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+  .mono { font-family: ui-monospace, Consolas, monospace; }
+  .wrap { flex: 1; display: grid; grid-template-columns: 250px 1fr; gap: 12px; padding: 12px; min-height: 0; }
+  aside, main { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px; min-height: 0; }
+  aside { display: flex; flex-direction: column; gap: 8px; overflow: auto; }
+  main { display: flex; flex-direction: column; min-width: 0; }
+  h2 { margin: 0 0 8px; font-size: 15px; }
+  h3 { margin: 14px 0 6px; font-size: 13px; }
+  button { font: inherit; padding: 6px 12px; border-radius: 10px; border: 1px solid var(--line); background: transparent; color: inherit; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.pri { border-color: var(--acc); color: var(--acc); }
+  button.danger { color: var(--bad); }
+  button.sm { padding: 3px 8px; font-size: 12px; }
+  input, textarea { font: inherit; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 10px; padding: 6px 8px; width: 100%; }
+  .srv { padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; }
+  .srv.on { border-color: var(--acc); }
+  .srv .t { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--muted); margin-right: 6px; }
+  .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+  .tabs { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-bottom: 10px; }
+  .tabs button.on { border-color: var(--acc); color: var(--acc); }
+  .pane { display: none; flex: 1; min-height: 0; overflow: auto; }
+  .pane.on { display: block; }
+  #p-term.on { display: flex; flex-direction: column; overflow: hidden; }
+  .line { height: 20px; line-height: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .kv { display: grid; grid-template-columns: 240px 1fr; gap: 4px 12px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 6px 6px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  th { color: var(--muted); font-weight: 500; }
+  td.act { white-space: nowrap; text-align: right; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .grow { flex: 1; min-width: 0; }
+  .code { padding: 10px; border: 1px dashed var(--acc); border-radius: 10px; word-break: break-all; user-select: all; }
+  pre#logs { margin: 0; white-space: pre-wrap; font: 12px ui-monospace, Consolas, monospace; }
+  #term { flex: 1; min-height: 0; background: #000; border-radius: 10px; padding: 6px; }
+  .empty { padding: 30px; text-align: center; }
+  .w120 { width: 120px; flex: none; }
+</style>
+<script src="/most/sdk.js"></script>
+<script src="vendor/xterm.js"></script>
+<script src="vendor/addon-fit.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <aside>
+    <h2>Серверы</h2>
+    <div id="list"></div>
+    <h3>Добавить сервер</h3>
+    <textarea id="line" rows="3" class="mono small" placeholder="most-relay 203.0.113.5:443 MRM-… — мастер-ключ с сервера (most-relay master)"></textarea>
+    <button class="pri" id="add">Добавить</button>
+    <div class="small muted">Мастер-ключ даёт полный доступ к серверу (терминал root) — храните его как пароль. В приложении он хранится только на этом ПК и наружу не показывается.</div>
+  </aside>
+  <main>
+    <div id="none" class="empty muted">Добавьте сервер слева: на сервере выполните <span class="mono">most-relay master</span> и вставьте строку.</div>
+    <div id="srvbox" style="display:none;flex:1;min-height:0;flex-direction:column">
+      <div class="row" style="margin-bottom:8px">
+        <h2 class="grow" id="stitle" style="margin:0">—</h2>
+        <button class="sm danger" id="forget" title="убрать сервер из этого приложения (сам сервер не трогается)">Убрать из списка</button>
+      </div>
+      <div class="line small" id="sline"></div>
+      <div class="tabs" style="margin-top:8px">
+        <button data-t="over" class="on">Обзор</button><button data-t="inv">Приглашение</button><button data-t="set">Настройки</button><button data-t="logs">Журнал</button><button data-t="term">Терминал</button>
+      </div>
+
+      <div class="pane on" id="p-over">
+        <div class="kv small" id="facts"></div>
+        <h3>Участники</h3>
+        <table><thead><tr><th>Имя</th><th>Состояние</th><th>Своя сеть</th><th>Трафик с запуска</th><th>Последний раз</th><th></th></tr></thead><tbody id="members"></tbody></table>
+      </div>
+
+      <div class="pane" id="p-inv">
+        <div class="small muted">Приглашение — для моста: «Соседи» → «Свой сервер-ретранслятор». Действует 5 минут и срабатывает один раз; мост сам получит свой постоянный ключ.</div>
+        <div class="row" style="margin-top:10px">
+          <input id="iname" class="grow" placeholder="имя участника (необязательно — тогда будет имя ПК)">
+          <button class="pri w120" id="mkinv">Создать</button>
+        </div>
+        <div style="margin-top:12px;min-height:90px">
+          <div id="invbox" style="visibility:hidden">
+            <div class="code mono" id="invline"></div>
+            <div class="row small" style="margin-top:6px"><span class="grow muted line" id="invleft"></span><button class="sm" id="invcopy">Скопировать</button></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="pane" id="p-set">
+        <div class="kv" style="align-items:center">
+          <div>Имя сервера</div><input id="s-name">
+          <div>Внешний адрес (IPv4)</div><input id="s-ip" class="mono">
+          <div>Разговоров на участника</div><input id="s-max" type="number" min="2" max="256">
+          <div>Файлы через сервер</div><label class="small"><input type="checkbox" id="s-files" style="width:auto"> разрешить мостам гнать файлы и синхронизацию через свою сеть</label>
+          <div>Скорость своей сети на участника</div><div class="row"><input id="s-mbit" type="number" min="0" max="10000" style="width:120px"><span class="small muted">Мбит/с, 0 — без ограничения (касается и игр)</span></div>
+          <div class="muted small">Порты</div><div class="muted small mono" id="s-ports"></div>
+        </div>
+        <div class="row" style="margin-top:10px"><button class="pri" id="s-save">Сохранить</button><span class="small muted line grow" id="s-note"></span></div>
+        <h3>Служба</h3>
+        <div class="row"><button id="restart">Перезапустить most-relay</button><span class="small muted">разговоры через сервер оборвутся на несколько секунд</span></div>
+        <h3>Мастер-ключ</h3>
+        <div class="row"><button class="danger" id="rotate">Сменить мастер-ключ</button><span class="small muted">старый сразу перестанет действовать (и на других ПК)</span></div>
+        <div style="margin-top:8px;min-height:60px"><div id="newmaster" class="code mono small" style="visibility:hidden"></div></div>
+      </div>
+
+      <div class="pane" id="p-logs">
+        <div class="row" style="margin-bottom:8px"><button id="logref">Обновить</button><span class="small muted">последние 300 строк журнала службы</span></div>
+        <pre id="logs" class="muted">—</pre>
+      </div>
+
+      <div class="pane" id="p-term">
+        <div class="row" style="margin-bottom:8px">
+          <span class="small line grow" id="tstate">терминал root на сервере</span>
+          <button class="sm w120" id="treopen" disabled>Открыть заново</button>
+        </div>
+        <div id="term"></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const size = (b) => (b >= 1 << 30 ? (b / (1 << 30)).toFixed(1) + ' ГБ' : (b / (1 << 20)).toFixed(1) + ' МБ');
+const toast = (t) => { try { most.toast(t); } catch { console.log(t); } };
+
+async function svc(path, body) {
+  const init = body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+  const r = await most.service.fetch(path, init);
+  let j = null;
+  try { j = await r.json(); } catch { j = { error: 'служба ответила непонятно (' + r.status + ')' }; }
+  if (!r.ok) throw new Error((j && j.error) || String(r.status));
+  return j;
+}
+const call = (op, args) => svc('call', { id: cur, op, args: args || {} });
+
+let servers = [], cur = null, tab = 'over', st = null;
+
+async function loadList() {
+  try { servers = await svc('servers'); } catch (e) { $('list').innerHTML = '<div class="small" style="color:var(--bad)">' + esc(e.message) + '</div>'; return; }
+  $('list').innerHTML = servers.map((s) => '<div class="srv' + (s.id === cur ? ' on' : '') + '" data-id="' + s.id + '"><div class="t"><span class="dot ' + (s.online ? 'ok' : s.error ? 'bad' : '') + '"></span>' + esc(s.title) + '</div><div class="small muted mono">' + esc(s.host + ':' + s.port) + '</div></div>').join('') || '<div class="small muted">пока нет</div>';
+  for (const el of $('list').querySelectorAll('.srv')) el.onclick = () => select(el.dataset.id);
+  if (!cur && servers.length) select(servers[0].id);
+  $('none').style.display = servers.length ? 'none' : '';
+  $('srvbox').style.display = servers.length ? 'flex' : 'none';
+}
+
+async function select(id) {
+  if (cur !== id) { closeTerm(); st = null; $('newmaster').style.visibility = 'hidden'; $('invbox').style.visibility = 'hidden'; $('logs').textContent = '—'; }
+  cur = id;
+  const s = servers.find((x) => x.id === id);
+  $('stitle').textContent = s ? s.title : '—';
+  for (const el of $('list').querySelectorAll('.srv')) el.classList.toggle('on', el.dataset.id === id);
+  await refresh();
+  if (tab === 'term') openTerm();
+  if (tab === 'set') loadSettings();
+  if (tab === 'logs') loadLogs();
+}
+
+async function refresh() {
+  if (!cur) return;
+  try {
+    st = await call('status');
+    $('sline').innerHTML = '<span class="dot ok"></span>на связи · ' + esc(st.publicIp) + ' · most-relay ' + esc(st.version) + (st.service ? ' · служба: ' + esc(st.service) : '') + (st.load ? ' · нагрузка ' + esc(st.load) : '');
+    $('stitle').textContent = st.name;
+    $('facts').innerHTML = [['Запущен', st.started], ['Разговоров через сервер сейчас', st.allocations], ['TCP-соединений', st.tcpConnections], ['Порты TURN', 'UDP ' + st.udpPort + ', TCP ' + st.tcpPorts.join(', ')], ['Своя сеть MostNet', st.netPort ? 'UDP ' + st.netPort + ' (запасной путь — TCP 443)' + ' · файлы через сервер: ' + (st.netFiles === false ? 'запрещены' : 'разрешены') + ' · скорость на участника: ' + (st.netMbit ? st.netMbit + ' Мбит/с' : 'без ограничения') : 'выключена'], ['Неиспользованных приглашений', st.invites]].map(([k, v]) => '<div class="muted">' + esc(k) + '</div><div>' + esc(v) + '</div>').join('');
+    $('members').innerHTML = st.members.map((m) => '<tr><td><b>' + esc(m.name) + '</b><div class="small muted">с ' + esc(m.created || '—') + '</div></td><td>' + (m.enabled ? '<span class="dot ok"></span>действует' + (m.allocs ? ' · в разговоре' : '') : '<span class="dot bad"></span>отозван') + '</td><td class="small mono">' + (m.vip ? esc(m.vip) + (m.net ? ' <span class="dot ok" title="на связи по ' + (m.net === 'udp' ? 'UDP' : 'TCP 443') + '"></span>' : '') : '<span class="muted">—</span>') + '</td><td class="small">' + size(m.up) + ' ↑ · ' + size(m.down) + ' ↓</td><td class="small muted">' + esc(m.lastSeen || '—') + '</td><td class="act">' + (m.enabled ? '<button class="sm" data-op="revoke" data-n="' + esc(m.name) + '">Отозвать</button>' : '<button class="sm" data-op="restore" data-n="' + esc(m.name) + '">Вернуть</button>') + ' <button class="sm danger" data-op="remove" data-n="' + esc(m.name) + '">Удалить</button></td></tr>').join('') || '<tr><td colspan="6" class="muted">Участников нет — создайте приглашение.</td></tr>';
+    for (const b of $('members').querySelectorAll('button')) b.onclick = () => member(b.dataset.op, b.dataset.n);
+  } catch (e) {
+    $('sline').innerHTML = '<span class="dot bad"></span>' + esc(e.message);
+  }
+}
+
+async function member(op, name) {
+  const q = { revoke: 'Отозвать «' + name + '»? Его разговоры через сервер сразу закроются.', remove: 'Удалить «' + name + '» совсем? Чтобы вернуть, понадобится новое приглашение.', restore: '' }[op];
+  if (q && !confirm(q)) return;
+  try { await call(op, { name }); await refresh(); } catch (e) { toast(e.message); }
+}
+
+// приглашение: 5 минут с обратным отсчётом
+let invTimer = 0;
+$('mkinv').onclick = async () => {
+  try {
+    const r = await call('invite', { name: $('iname').value.trim() });
+    $('invline').textContent = r.line;
+    $('invbox').style.visibility = 'visible';
+    clearInterval(invTimer);
+    const tick = () => {
+      const left = r.expires - Math.floor(Date.now() / 1000);
+      $('invleft').textContent = left > 0 ? 'действует ещё ' + Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0') + ' · срабатывает один раз' : 'просрочено — создайте новое';
+      if (left <= 0) clearInterval(invTimer);
+    };
+    tick(); invTimer = setInterval(tick, 1000);
+    refresh();
+  } catch (e) { toast(e.message); }
+};
+$('invcopy').onclick = async () => {
+  try { await navigator.clipboard.writeText($('invline').textContent); toast('Скопировано'); }
+  catch { const r = document.createRange(); r.selectNodeContents($('invline')); const s = getSelection(); s.removeAllRanges(); s.addRange(r); toast('Выделено — нажмите Ctrl+C'); }
+};
+
+async function loadSettings() {
+  try {
+    const s = await call('settings');
+    $('s-name').value = s.name; $('s-ip').value = s.publicIp; $('s-max').value = s.maxPerMember;
+    $('s-files').checked = s.netFiles !== false; $('s-mbit').value = s.netMbit || 0;
+    $('s-ports').textContent = 'TURN UDP ' + s.udpPort + ', TCP ' + s.tcpPorts.join(', ') + ' · ретрансляция UDP ' + s.relayPorts.join('–') + ' (меняются в relay.json)';
+  } catch (e) { toast(e.message); }
+}
+$('s-save').onclick = async () => {
+  try {
+    const r = await call('settings.set', { name: $('s-name').value, publicIp: $('s-ip').value, maxPerMember: +$('s-max').value, netFiles: $('s-files').checked, netMbit: Math.max(0, +$('s-mbit').value || 0) });
+    $('s-note').textContent = r.restart ? 'Сохранено. Новые адрес и лимит заработают после перезапуска службы.' : 'Сохранено.';
+    refresh(); loadList();
+  } catch (e) { $('s-note').textContent = e.message; }
+};
+$('restart').onclick = async () => {
+  if (!confirm('Перезапустить most-relay? Разговоры через сервер оборвутся на несколько секунд.')) return;
+  try { await call('restart'); toast('Служба перезапускается'); closeTerm(); setTimeout(refresh, 4000); } catch (e) { toast(e.message); }
+};
+$('rotate').onclick = async () => {
+  if (!confirm('Сменить мастер-ключ? Старый сразу перестанет действовать — на других ПК сервер придётся добавить заново новым ключом.')) return;
+  try {
+    const r = await call('master.rotate');
+    $('newmaster').textContent = r.line;
+    $('newmaster').style.visibility = 'visible';
+    toast('Мастер-ключ сменён — новый уже сохранён в этом приложении');
+    closeTerm();
+  } catch (e) { toast(e.message); }
+};
+
+async function loadLogs() {
+  try { const r = await call('logs', { lines: 300 }); $('logs').textContent = r.text || '—'; } catch (e) { $('logs').textContent = e.message; }
+}
+$('logref').onclick = loadLogs;
+
+// терминал root: ввод пачками, вывод долгим опросом
+let term = null, fit = null, tid = null, termGen = 0;
+function ensureXterm() {
+  if (term) return;
+  term = new Terminal({ fontSize: 13, fontFamily: 'ui-monospace, Consolas, monospace', cursorBlink: true, scrollback: 5000, theme: { background: '#000000' } });
+  fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open($('term'));
+  let q = '', t = 0;
+  term.onData((d) => {
+    if (!tid) return;
+    q += d; clearTimeout(t);
+    t = setTimeout(() => { const data = btoa(String.fromCharCode(...new TextEncoder().encode(q))); q = ''; svc('term/write', { id: cur, tid, data }).catch((e) => term.write('\r\n[' + e.message + ']\r\n')); }, 12);
+  });
+  new ResizeObserver(() => { if (tab !== 'term') return; try { fit.fit(); } catch {} if (tid) svc('term/resize', { id: cur, tid, cols: term.cols, rows: term.rows }).catch(() => {}); }).observe($('term'));
+}
+async function openTerm() {
+  ensureXterm();
+  if (tid) return;
+  try { fit.fit(); } catch {}
+  $('treopen').disabled = true;
+  $('tstate').textContent = 'подключаюсь…';
+  const gen = ++termGen;
+  try {
+    const r = await svc('term/open', { id: cur, cols: term.cols, rows: term.rows });
+    if (gen !== termGen) return;
+    tid = r.tid;
+    $('tstate').textContent = 'терминал root на сервере «' + (st ? st.name : '') + '» — команды выполняются по-настоящему';
+    term.focus();
+    let after = 0;
+    while (gen === termGen) {
+      const x = await svc('term/read?id=' + encodeURIComponent(cur) + '&tid=' + encodeURIComponent(tid) + '&after=' + after);
+      if (gen !== termGen) break;
+      for (const c of x.chunks) term.write(Uint8Array.from(atob(c), (ch) => ch.charCodeAt(0)));
+      after = x.next;
+      if (x.exited) { term.write('\r\n[терминал закрыт]\r\n'); break; }
+    }
+  } catch (e) {
+    if (gen === termGen) term.write('\r\n[' + e.message + ']\r\n');
+  }
+  if (gen === termGen) { tid = null; $('tstate').textContent = 'терминал закрыт'; $('treopen').disabled = false; }
+}
+function closeTerm() {
+  termGen++;
+  if (tid) svc('term/close', { id: cur, tid }).catch(() => {});
+  tid = null;
+  $('treopen').disabled = false;
+}
+$('treopen').onclick = () => { term && term.clear(); openTerm(); };
+
+for (const b of document.querySelectorAll('.tabs button')) b.onclick = () => {
+  tab = b.dataset.t;
+  for (const x of document.querySelectorAll('.tabs button')) x.classList.toggle('on', x === b);
+  for (const p of document.querySelectorAll('.pane')) p.classList.toggle('on', p.id === 'p-' + tab);
+  if (tab === 'set') loadSettings();
+  if (tab === 'logs') loadLogs();
+  if (tab === 'term') { openTerm(); setTimeout(() => { try { fit.fit(); } catch {} }, 50); }
+};
+
+$('add').onclick = async () => {
+  const line = $('line').value.trim();
+  if (!line) return;
+  $('add').disabled = true;
+  try { const r = await svc('servers', { line }); $('line').value = ''; cur = null; await loadList(); select(r.id); toast('Сервер добавлен'); }
+  catch (e) { toast(e.message); }
+  finally { $('add').disabled = false; }
+};
+$('forget').onclick = async () => {
+  const s = servers.find((x) => x.id === cur);
+  if (!s || !confirm('Убрать «' + s.title + '» из приложения? Сам сервер и его участники не изменятся; вернуть — мастер-ключом.')) return;
+  closeTerm();
+  await svc('servers/remove', { id: cur }).catch((e) => toast(e.message));
+  cur = null; loadList();
+};
+
+most.on('theme', (t) => document.body.classList.toggle('light', t === 'light'));
+most.ready().then((me) => {
+  document.body.classList.toggle('light', me.theme === 'light');
+  loadList();
+  setInterval(() => { if (tab === 'over') refresh(); loadList(); }, 10000);
+}).catch((e) => { $('none').textContent = 'Приложение работает только внутри Моста: ' + e.message; });
+</script>
+</body>
+</html>

@@ -275,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-app"
-version = "3.14.0"
+version = "3.19.2"
 dependencies = [
  "axum",
  "bridge-core",
@@ -291,11 +291,13 @@ dependencies = [
 
 [[package]]
 name = "bridge-core"
-version = "3.14.0"
+version = "3.19.2"
 dependencies = [
  "base64 0.22.1",
+ "chacha20poly1305",
  "chrono",
  "hex",
+ "hkdf",
  "hmac",
  "indexmap 2.14.2",
  "parking_lot",
@@ -305,16 +307,18 @@ dependencies = [
  "sha2",
  "unicode-normalization",
  "uuid",
+ "x25519-dalek",
 ]
 
 [[package]]
 name = "bridge-node"
-version = "3.14.0"
+version = "3.19.2"
 dependencies = [
  "argon2",
  "axum",
  "base64 0.22.1",
  "bridge-core",
+ "bridge-turn",
  "bytes",
  "chacha20poly1305",
  "chrono",
@@ -344,6 +348,23 @@ dependencies = [
  "uuid",
  "windows-sys 0.59.0",
  "zip",
+]
+
+[[package]]
+name = "bridge-turn"
+version = "3.19.2"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "crc32fast",
+ "hex",
+ "hmac",
+ "md-5",
+ "parking_lot",
+ "rand",
+ "sha1",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -407,6 +428,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "c2rust-bitfields"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b43c3f07ab0ef604fa6f595aa46ec2f8a22172c975e186f6f5bf9829a3b72c41"
+dependencies = [
+ "c2rust-bitfields-derive",
+]
+
+[[package]]
+name = "c2rust-bitfields-derive"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3cbc102e2597c9744c8bd8c15915d554300601c91a079430d309816b0912545"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -2135,7 +2176,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e9ec52138abedcc58dc17a7c6c0c00a2bdb4f3427c7f63fa97fd0d859155caf"
 dependencies = [
  "gtk-sys",
- "libloading",
+ "libloading 0.7.4",
  "once_cell",
 ]
 
@@ -2162,6 +2203,16 @@ checksum = "b67380fd3b2fbe7527a606e18729d21c6f3951633d0500574c4dc22d2d638b9f"
 dependencies = [
  "cfg-if",
  "winapi",
+]
+
+[[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
 ]
 
 [[package]]
@@ -2283,6 +2334,56 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "most-net"
+version = "3.19.2"
+dependencies = [
+ "axum",
+ "bridge-core",
+ "chrono",
+ "futures-util",
+ "hex",
+ "libc",
+ "parking_lot",
+ "rand",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "wintun",
+]
+
+[[package]]
+name = "most-relay"
+version = "3.19.2"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "bridge-core",
+ "bridge-turn",
+ "chacha20poly1305",
+ "chrono",
+ "futures-util",
+ "hex",
+ "hkdf",
+ "hmac",
+ "hyper",
+ "hyper-util",
+ "if-addrs",
+ "libc",
+ "parking_lot",
+ "rand",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -3630,6 +3731,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b64191b275b66ffe2469e8af2c1cfe3bafa67b529ead792a6d0160888b4237"
 dependencies = [
  "proc-macro2",
+ "quote",
  "unicode-ident",
 ]
 
@@ -4831,6 +4933,15 @@ dependencies = [
 
 [[package]]
 name = "windows-sys"
+version = "0.52.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
+dependencies = [
+ "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "windows-sys"
 version = "0.59.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
@@ -5072,6 +5183,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "wintun"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da99be64b5aa3de869c16977994314d0759a698d9a73ab0a5b1d52e2282033ae"
+dependencies = [
+ "c2rust-bitfields",
+ "libloading 0.8.9",
+ "log",
+ "thiserror 1.0.69",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5149,6 +5273,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "x25519-dalek"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
+dependencies = [
+ "curve25519-dalek",
+ "rand_core",
+ "serde",
+ "zeroize",
+]
+
+[[package]]
 name = "yoke"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5217,6 +5353,20 @@ name = "zeroize"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "zerotrie"

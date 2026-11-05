@@ -96,6 +96,8 @@ pub struct HelloResponse {
     /// (2.8) Ретранслятор голоса этого узла для спрашивающего: порт UDP и временный ключ.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn: Option<TurnInfo>,
+    /// Свой сервер-ретранслятор этого моста, если он делится им с соседями (с 3.16).
+    pub relay: Option<crate::relay::RelayInfo>,
     /// (2.8) Ассистент живёт на этом узле — спрашивающему можно писать ему.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assistant: Option<AssistantInfo>,
@@ -114,6 +116,9 @@ pub struct HelloResponse {
     /// (3.1) Отпечаток плитки участника (стиль и картинка: GET /peer/tile, /peer/tile/img).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tile: String,
+    /// (3.19) Этот узел хочет гонять файлы со спрашивающим через свой сервер (своя сеть 10.77).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bulk: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -143,6 +148,8 @@ pub struct TurnInfo {
     pub port: u16,
     pub username: String,
     pub credential: String,
+    /// Ретранслятор принимает и TCP на том же порту (с 3.15).
+    pub tcp: bool,
 }
 
 /// Канал для соседей: ключ «владелец:id», участники — имена узлов (вместе с владельцем).
@@ -171,12 +178,14 @@ impl Default for HelloResponse {
             channels: Vec::new(),
             agent: String::new(),
             turn: None,
+            relay: None,
             assistant: None,
             runners: Vec::new(),
             avatar: String::new(),
             sound: String::new(),
             ping: String::new(),
             tile: String::new(),
+            bulk: false,
         }
     }
 }

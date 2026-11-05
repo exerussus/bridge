@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["core", "node", "app"]
+members = ["core", "turn", "node", "relay", "net", "app"]
 
 [workspace.package]
-version = "3.14.0"
+version = "3.19.2"
 edition = "2021"
 license = "UNLICENSED"
 

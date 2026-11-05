@@ -14,12 +14,15 @@
   let ip = $state(ip0);
   let port = $state(port0);
   let extra = $state(extraList.join(', '));
+  // свой адрес соседа в своей сети (10.77.x.y), если он его уже сообщил, — подсказка для запасного
+  const netIp = (p.ips || []).find((i: string) => /^10\.77\./.test(i)) || '';
+  let alt = $state(p.alt || '');
   let secret = $state('');
   let shares = $state<string[]>([...p.shares]);
   let enabled = $state(p.enabled);
   let made = $state('');
   async function save() {
-    const body: any = { name: p.name, title, ip: ip.trim() || null, port: +port || 5390, extraIps: extra.split(',').map((s: string) => s.trim()).filter(Boolean), secret: secret.trim() || null, shares, enabled };
+    const body: any = { name: p.name, title, ip: ip.trim() || null, port: +port || 5390, extraIps: extra.split(',').map((s: string) => s.trim()).filter(Boolean), alt: alt.trim(), secret: secret.trim() || null, shares, enabled };
     try {
       const r = await api('POST', 'peers', body);
       await load();
@@ -33,7 +36,8 @@
 <h3>Сосед «{p.title || p.name}»</h3>
 <label class="f">Имя узла — сосед сообщает его сам<input disabled value={p.name + (p.pending ? ' (временное — до первого ответа)' : '')} /></label>
 <label class="f">Псевдоним — для вас (можно менять)<input bind:value={title} placeholder="Рабочий ноутбук" /></label>
-<div class="row"><label class="f" style="flex:1">Адрес (IP)<input bind:value={ip} placeholder="192.168.1.172 или 26.x.x.x" /></label><label class="f" style="width:110px">Порт<input bind:value={port} /></label></div>
+<div class="row"><label class="f" style="flex:1">Основной адрес (IP) — Radmin, домашняя сеть<input bind:value={ip} placeholder="192.168.1.172 или 26.x.x.x" /></label><label class="f" style="width:110px">Порт<input bind:value={port} /></label></div>
+<label class="f">Запасной адрес — если основной не отвечает. Адрес соседа в своей сети (10.77.x.y) мост вписывает сам, когда сосед его сообщит{#if netIp && !alt} — сейчас это <b class="mono">{netIp}</b>{/if}<input bind:value={alt} placeholder={netIp || '10.77.0.x'} /></label>
 <label class="f">Ещё адреса, с которых его пускать (через запятую). С 1.4 сосед сообщает свои адреса сам — вписывать нужно только для старых версий<input bind:value={extra} /></label>
 <label class="f">Ключ пары (пусто — не менять; новый — такой же и на том ПК)<input bind:value={secret} placeholder="BRS-…" autocomplete="off" /></label>
 <div class="f">Пространства<div class="row">{#each ui.ov.shares as s (s.id)}<label><input type="checkbox" value={s.id} bind:group={shares} /> {s.id}</label>{/each}</div>

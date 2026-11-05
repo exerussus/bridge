@@ -106,6 +106,8 @@ pub struct PeerClient {
     legacy: AtomicBool,
     progress: Option<std::sync::Arc<crate::progress::Transfers>>,
     limits: Option<std::sync::Arc<crate::progress::Limits>>,
+    /// Адрес для файлов (3.19: через свой сервер); None — тот же, что для всего.
+    bulk_base: Option<String>,
 }
 
 pub enum Body {
@@ -136,7 +138,14 @@ impl PeerClient {
             legacy: AtomicBool::new(false),
             progress: None,
             limits: None,
+            bulk_base: None,
         }
+    }
+
+    /// Файлы — по другому адресу (3.19: адрес соседа в своей сети, через свой сервер).
+    pub fn with_bulk(mut self, url: Option<String>) -> Self {
+        self.bulk_base = url.map(|u| u.trim_end_matches('/').to_string());
+        self
     }
 
     pub fn with_progress(mut self, p: std::sync::Arc<crate::progress::Transfers>, l: std::sync::Arc<crate::progress::Limits>) -> Self {
@@ -156,8 +165,9 @@ impl PeerClient {
         self.legacy.load(Ordering::Relaxed)
     }
 
-    async fn build(&self, method: &Method, rel: &str, body: &Body) -> Result<reqwest::Request, PeerError> {
-        let url = format!("{}{}", self.base, rel);
+    async fn build(&self, method: &Method, rel: &str, body: &Body, bulk: bool) -> Result<reqwest::Request, PeerError> {
+        let base = if bulk { self.bulk_base.as_deref().unwrap_or(&self.base) } else { &self.base };
+        let url = format!("{}{}", base, rel);
         let parsed = reqwest::Url::parse(&url).map_err(|e| PeerError::Io(format!("адрес соседа «{}»: {}", url, e)))?;
         let pq = match parsed.query() {
             Some(q) => format!("{}?{}", parsed.path(), q),
@@ -199,9 +209,25 @@ impl PeerClient {
         rb.build().map_err(|e| PeerError::Io(e.to_string()))
     }
 
-    /// Отправить запрос; старому соседу — повторить со старой подписью.
+    /// Отправить запрос; старому соседу — повторить со старой подписью. Загрузка файла — по адресу для файлов.
     async fn send(&self, method: Method, rel: &str, body: Body) -> Result<reqwest::Response, PeerError> {
-        let req = self.build(&method, rel, &body).await?;
+        let bulk = matches!(body, Body::File(..));
+        self.send_ex(method, rel, body, bulk).await
+    }
+
+    /// `bulk` — файл: по адресу для файлов (через свой сервер), а если он не отвечает — по обычному.
+    async fn send_ex(&self, method: Method, rel: &str, body: Body, bulk: bool) -> Result<reqwest::Response, PeerError> {
+        if bulk && self.bulk_base.is_some() {
+            match self.send_at(method.clone(), rel, &body, true).await {
+                Err(PeerError::Net(..)) => {}
+                r => return r,
+            }
+        }
+        self.send_at(method, rel, &body, false).await
+    }
+
+    async fn send_at(&self, method: Method, rel: &str, body: &Body, bulk: bool) -> Result<reqwest::Response, PeerError> {
+        let req = self.build(&method, rel, body, bulk).await?;
         let resp = self.http.execute(req).await.map_err(|e| classify(&e))?;
         if self.legacy() || resp.status() != StatusCode::UNAUTHORIZED {
             return Ok(resp);
@@ -211,7 +237,7 @@ impl PeerClient {
             return Err(PeerError::Http(401, error_text(&text, 401)));
         }
         self.legacy.store(true, Ordering::Relaxed);
-        let req = self.build(&method, rel, &body).await?;
+        let req = self.build(&method, rel, body, bulk).await?;
         self.http.execute(req).await.map_err(|e| classify(&e))
     }
 
@@ -289,7 +315,7 @@ impl PeerClient {
 
     #[allow(clippy::too_many_arguments)]
     async fn download_req(&self, method: Method, rel: &str, body: Body, dest: &Path, max_bytes: i64, what: &str, label: &str) -> Result<String, PeerError> {
-        let resp = Self::ensure(self.send(method, rel, body).await?).await?;
+        let resp = Self::ensure(self.send_ex(method, rel, body, true).await?).await?;
         let guard = self.progress.as_ref().map(|t| t.start("down", &self.peer_name, what, label, resp.content_length().unwrap_or(0) as i64));
         if let Some(len) = resp.content_length() {
             if len as i64 > max_bytes {

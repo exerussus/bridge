@@ -1,0 +1,15 @@
+{
+  "id": "most-relay-admin",
+  "name": "Сервер",
+  "version": "3.19.2",
+  "description": "Свой сервер-ретранслятор (most-relay) по мастер-ключу: участники и их трафик, одноразовые приглашения, настройки, журнал и терминал root.",
+  "author": "Мост",
+  "ui": "ui/index.html",
+  "icon": "ui/icon.svg",
+  "service": { "cmd": "svc/most-relay.exe", "args": ["app-service"], "run": "open" },
+  "window": { "w": 1000, "h": 720 },
+  "platforms": ["windows"],
+  "permissions": [],
+  "share": true,
+  "bridge": "apps@1"
+}

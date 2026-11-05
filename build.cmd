@@ -32,15 +32,24 @@ exit /b 1
 
 :rust
 echo [2/4] Программа...
-cargo build --release -p bridge-node -p bridge-app || goto :fail
+cargo build --release -p bridge-node -p bridge-app -p most-relay -p most-net || goto :fail
 if not exist publish mkdir publish
 copy /y target\release\bridge.exe publish\bridge.exe >nul || goto :fail
 copy /y target\release\bridge-app.exe "publish\Most.exe" >nul || goto :fail
 echo       publish\Most.exe и publish\bridge.exe готовы
+rem приложение «Сервер» (свой сервер-ретранслятор по мастер-ключу): интерфейс + служба most-relay.exe
+if not exist publish\apps\most-relay-admin\svc mkdir publish\apps\most-relay-admin\svc
+xcopy /e /i /y /q apps\relay-admin publish\apps\most-relay-admin >nul || goto :fail
+copy /y target\release\most-relay.exe publish\apps\most-relay-admin\svc\most-relay.exe >nul || goto :fail
+echo       publish\apps\most-relay-admin — приложение «Сервер» (положите папку в apps рядом с Most.exe)
+rem своя локальная сеть: служба most-net.exe и драйвер адаптера wintun.dll (скачивается один раз, подпись WireGuard LLC проверяется)
+copy /y target\release\most-net.exe publish\most-net.exe >nul || goto :fail
+if not exist publish\wintun.dll call :wintun
+if exist publish\wintun.dll echo       publish\most-net.exe и publish\wintun.dll — своя локальная сеть (положите рядом с Most.exe)
 
 if /i "%~1"=="notest" goto :done
 echo [3/4] Тесты (около минуты; брандмауэр может спросить про доступ — тесты работают только на 127.0.0.1)...
-cargo test --release -p bridge-core -p bridge-node > publish\tests.log 2>&1 || goto :testfail
+cargo test --release -p bridge-core -p bridge-turn -p bridge-node -p most-relay -p most-net > publish\tests.log 2>&1 || goto :testfail
 echo       тесты прошли (подробно: publish\tests.log)
 
 :done
@@ -48,6 +57,9 @@ echo [4/4] Готово.
 echo.
 echo Установка: закройте старый «Мост» (значок у часов → Выход), положите Most.exe и bridge.exe в его папку
 echo (рядом с bridge.json) и запустите Most.exe. Настройки, соседи, история и папки подхватятся.
+echo Приложение «Сервер»: папку publish\apps\most-relay-admin — в папку apps моста (мост подхватит её сам).
+echo Сервер для VPS (Linux): relay\bin\most-relay — как поставить, в relay\README.md.
+echo Своя локальная сеть: publish\most-net.exe и publish\wintun.dll — рядом с Most.exe.
 exit /b 0
 
 :testfail
@@ -66,3 +78,9 @@ exit /b 1
 :fail
 echo Сборка не удалась (код %errorlevel%).
 exit /b 1
+
+:wintun
+echo       Скачиваю wintun.dll (драйвер адаптера своей сети, www.wintun.net)...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $z=Join-Path $env:TEMP 'wintun-0.14.1.zip'; Invoke-WebRequest -UseBasicParsing 'https://www.wintun.net/builds/wintun-0.14.1.zip' -OutFile $z; $d=Join-Path $env:TEMP 'wintun-0.14.1'; if (Test-Path $d) { Remove-Item -Recurse -Force $d }; Expand-Archive $z $d; $f=Join-Path $d 'wintun\bin\amd64\wintun.dll'; $s=Get-AuthenticodeSignature $f; if ($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -notmatch 'WireGuard') { throw ('bad wintun.dll signature: ' + $s.Status + ' ' + $s.SignerCertificate.Subject) }; Copy-Item $f 'publish\wintun.dll' -Force"
+if errorlevel 1 echo       Не удалось скачать или проверить wintun.dll — своя сеть без неё не заработает (остальное собрано).
+exit /b 0

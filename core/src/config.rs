@@ -55,6 +55,8 @@ pub struct NodeConfig {
     pub mobile: MobileConfig,
     /// Ретранслятор голоса (2.8, UDP): разговор через этот ПК, когда участники не видят друг друга напрямую. 0 — выключен.
     pub turn_port: u16,
+    /// Свой сервер-ретранслятор (3.16, most-relay): опция; без приглашения — как раньше (прямые адреса, Radmin).
+    pub relay: RelayConfig,
     /// Ассистент (2.8): кто из соседей может писать ассистенту на этом ПК.
     pub assistant: AssistantConfig,
 }
@@ -166,8 +168,46 @@ impl Default for NodeConfig {
             agent: AgentConfig::default(),
             mobile: MobileConfig::default(),
             turn_port: 3478,
+            relay: RelayConfig::default(),
             assistant: AssistantConfig::default(),
         }
+    }
+}
+
+/// Свой сервер-ретранслятор: адрес, ключ участника (мост получил его по одноразовому приглашению), когда им
+/// пользоваться, делиться ли им с соседями.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RelayConfig {
+    /// «адрес:порт» сервера; пусто — сервера нет.
+    pub server: String,
+    /// Под каким именем этот ПК у сервера.
+    pub member: String,
+    /// Ключ участника (как ключ пары соседей) — им подписываются запросы к серверу.
+    pub secret: String,
+    /// auto — если напрямую не вышло (WebRTC сам выбирает лучший путь); always — голос только через сервер; off — не пользоваться (и серверами соседей тоже).
+    pub mode: String,
+    /// Отдавать временный ключ сервера соседям: тогда сервер работает и у них, без своей настройки.
+    pub share: bool,
+    /// Своя локальная сеть MostNet (3.17) через этот сервер: служба most-net на ПК включена.
+    pub net: bool,
+    /// Файлы и синхронизация с соседями — через сервер (3.19): по их адресам в своей сети, если сервер разрешает.
+    pub files: bool,
+}
+
+impl Default for RelayConfig {
+    fn default() -> Self {
+        RelayConfig { server: String::new(), member: String::new(), secret: String::new(), mode: "auto".into(), share: true, net: false, files: false }
+    }
+}
+
+impl RelayConfig {
+    pub fn configured(&self) -> bool {
+        !self.server.is_empty() && !self.secret.is_empty()
+    }
+
+    pub fn mode_ok(m: &str) -> bool {
+        matches!(m, "auto" | "always" | "off")
     }
 }
 
@@ -193,11 +233,59 @@ pub struct PeerConfig {
     pub ips: Vec<String>,
     pub secret: String,
     pub enabled: bool,
+    /// Запасной адрес (3.17.1): если основной (`url`, обычно Radmin) не отвечает, мост пробует его — например, адрес
+    /// соседа в своей сети 10.77.x.y. Адреса соседа из своей сети, известные из его привета (`ips`), пробуются и без него.
+    pub alt: String,
+    /// Когда адрес из `ips` последний раз использовался (дата UTC «ГГГГ-ММ-ДД»): с него пришёл подписанный запрос
+    /// соседа или мы до соседа по нему достучались. Не использованные больше `IP_KEEP_DAYS` — убираются (3.18).
+    pub ip_seen: std::collections::BTreeMap<String, String>,
 }
+
+/// Сколько дней хранить неиспользуемый дополнительный адрес соседа.
+pub const IP_KEEP_DAYS: i64 = 3;
 
 impl Default for PeerConfig {
     fn default() -> Self {
-        PeerConfig { name: String::new(), pending: false, title: String::new(), url: String::new(), ips: Vec::new(), secret: String::new(), enabled: true }
+        PeerConfig { name: String::new(), pending: false, title: String::new(), url: String::new(), ips: Vec::new(), secret: String::new(), enabled: true, alt: String::new(), ip_seen: Default::default() }
+    }
+}
+
+impl PeerConfig {
+    /// Адреса, которые не убираются никогда: основной, запасной из настроек, адреса своей сети 10.77.x.y.
+    pub fn ip_pinned(&self, ip: &str) -> bool {
+        let host = |u: &str| parse_url(u).map(|(h, _)| h.to_string());
+        if host(&self.url).as_deref() == Some(ip) {
+            return true;
+        }
+        let alt = self.alt.trim();
+        if !alt.is_empty() && (alt == ip || alt.split(':').next() == Some(ip)) {
+            return true;
+        }
+        ip.parse::<std::net::Ipv4Addr>().map(crate::mostnet::in_net).unwrap_or(false)
+    }
+
+    /// Убрать адреса, не использованные дольше `IP_KEEP_DAYS` (у адресов без даты — дата `today`: отсчёт с сегодня).
+    /// Возвращает убранные.
+    pub fn prune_ips(&mut self, today: chrono::NaiveDate) -> Vec<String> {
+        let t = today.format("%Y-%m-%d").to_string();
+        let mut gone = Vec::new();
+        let ips = std::mem::take(&mut self.ips);
+        for ip in ips {
+            if self.ip_pinned(&ip) {
+                self.ips.push(ip);
+                continue;
+            }
+            let seen = self.ip_seen.entry(ip.clone()).or_insert_with(|| t.clone()).clone();
+            let old = chrono::NaiveDate::parse_from_str(&seen, "%Y-%m-%d").map(|d| (today - d).num_days() > IP_KEEP_DAYS).unwrap_or(false);
+            if old {
+                gone.push(ip);
+            } else {
+                self.ips.push(ip);
+            }
+        }
+        let keep: std::collections::HashSet<String> = self.ips.iter().cloned().collect();
+        self.ip_seen.retain(|k, _| keep.contains(k));
+        gone
     }
 }
 
@@ -823,6 +911,29 @@ pub fn cached_ignore<'a, I: Iterator<Item = &'a String>>(patterns: I) -> Arc<Ign
         map.clear();
     }
     map.entry(key).or_insert_with(|| Arc::new(IgnoreRules::new(list.iter().map(|s| s.as_str())))).clone()
+}
+
+#[cfg(test)]
+mod ip_prune_tests {
+    use super::*;
+
+    #[test]
+    fn prune_keeps_pinned_and_fresh() {
+        let mut p = PeerConfig { url: "http://26.1.1.1:5390".into(), alt: "10.9.9.9".into(), ..Default::default() };
+        p.ips = vec!["26.1.1.1".into(), "10.9.9.9".into(), "10.77.0.3".into(), "172.19.0.1".into(), "192.168.0.14".into(), "172.27.96.179".into()];
+        p.ip_seen.insert("172.19.0.1".into(), "2026-10-01".into());
+        p.ip_seen.insert("192.168.0.14".into(), "2026-11-03".into());
+        p.ip_seen.insert("26.1.1.1".into(), "2020-01-01".into());
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 4).unwrap();
+        let gone = p.prune_ips(today);
+        assert_eq!(gone, vec!["172.19.0.1".to_string()]);
+        // без даты — отсчёт с сегодня, основной/запасной/своя сеть — никогда
+        assert_eq!(p.ips, vec!["26.1.1.1", "10.9.9.9", "10.77.0.3", "192.168.0.14", "172.27.96.179"]);
+        assert_eq!(p.ip_seen.get("172.27.96.179").map(|s| s.as_str()), Some("2026-11-04"));
+        let later = chrono::NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+        assert_eq!(p.prune_ips(later), vec!["192.168.0.14".to_string(), "172.27.96.179".to_string()]);
+        assert_eq!(p.ips, vec!["26.1.1.1", "10.9.9.9", "10.77.0.3"]);
+    }
 }
 
 #[cfg(test)]

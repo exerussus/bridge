@@ -2,11 +2,21 @@
   import { ui, toast, load, openModal } from '../lib/state.svelte';
   import { api } from '../lib/api';
   import { ago, copy } from '../lib/util';
+  // что за адрес: по нему видно, через что связь — Radmin, своя сеть, домашняя сеть
+  function netKind(hp: string): string {
+    const ip = hp.replace(/:\d+$/, '');
+    const o = ip.split('.').map(Number);
+    const kind = o[0] === 26 ? 'Radmin' : o[0] === 10 && o[1] === 77 ? 'свою сеть' : o[0] === 100 && o[1] >= 64 && o[1] < 128 ? 'Tailscale'
+      : o[0] === 192 && o[1] === 168 || o[0] === 10 || o[0] === 172 && o[1] >= 16 && o[1] < 32 ? 'локальную сеть' : o[0] === 127 ? 'этот ПК' : '';
+    return (kind ? kind + ' · ' : '') + ip;
+  }
   import Gi from '../components/Gi.svelte';
   import CheckPeer from '../modals/CheckPeer.svelte';
   import ConnectPeer from '../modals/ConnectPeer.svelte';
   import InvitePeer from '../modals/InvitePeer.svelte';
   import EditPeer from '../modals/EditPeer.svelte';
+  import RelayCard from '../components/RelayCard.svelte';
+  import NetCard from '../components/NetCard.svelte';
   import { removePeer } from '../lib/peers';
 
   const ov = $derived(ui.ov);
@@ -37,13 +47,13 @@
       {#each ov.peers as p (p.name)}
         <tr>
           <td><span class="dot {dotOf(p)}"></span> <b>{p.title || p.name}</b><div class="small muted mono">{p.name}{p.pending ? ' (временное)' : ''}</div></td>
-          <td class="mono small">{(p.url || '—').replace('http://', '')}{#if p.ips.length}<div class="muted" title="принимаем запросы с этих адресов">{p.ips.join(', ')}</div>{/if}</td>
+          <td class="mono small">{(p.url || '—').replace('http://', '')}{#if p.alt}<div title="запасной адрес">запасной: {p.alt}</div>{/if}{#if p.ips.length}<div class="muted" title="принимаем запросы с этих адресов; не использованные больше 3 дней убираются сами (кроме основного, запасного и своей сети)">{#each p.ips as ip, i}<span title={(p.ipSeen && p.ipSeen[ip]) ? 'последний раз: ' + p.ipSeen[ip] : 'ещё не использовался'}>{ip}</span>{i < p.ips.length - 1 ? ', ' : ''}{/each}</div>{/if}</td>
           <td class="small">
             {#if !p.enabled}<span class="pill">выключен</span>
             {:else if p.invite}<span class="pill acc">ждём подключения</span><div class="muted">приглашение: сосед подключится по адресу этого ПК и ключу</div>
             {:else}
               {#if p.online}
-                <div><span class="pill ok">→ на связи</span> <span class="muted">{ago(p.lastSeen)}{p.latency != null ? ' · ' + p.latency + ' мс' : ''}{p.version ? ' · v' + p.version : ''}{p.status && p.status.waitingApproval ? ' · ждёт подтверждения: ' + p.status.waitingApproval : ''}</span></div>
+                <div><span class="pill ok">→ на связи</span>{#if p.via} <span class="pill {p.viaMain ? '' : 'acc'}" title={p.viaMain ? 'связь по основному адресу' : 'основной адрес не отвечает — связь через запасной'}>через {netKind(p.via)}{p.viaMain ? '' : ' (запасной)'}</span>{/if}{#if p.filesVia} <span class="pill" title="файлы и синхронизация с этим соседом идут через свой сервер">файлы через сервер</span>{/if} <span class="muted">{ago(p.lastSeen)}{p.latency != null ? ' · ' + p.latency + ' мс' : ''}{p.version ? ' · v' + p.version : ''}{p.status && p.status.waitingApproval ? ' · ждёт подтверждения: ' + p.status.waitingApproval : ''}</span></div>
               {:else}
                 <div><span class="pill bad">→ нет связи</span> {p.error || 'ещё не проверено'}</div>{#if p.hint}<div class="muted">{p.hint}</div>{/if}
               {/if}
@@ -93,6 +103,9 @@
     </tbody>
   </table>
 </div>
+
+<RelayCard />
+<NetCard />
 
 <div class="grid" style="margin-top:14px">
   <div class="card"><h3>Этот ПК</h3>

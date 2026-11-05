@@ -158,6 +158,7 @@ pub fn learn_address(node: &Arc<Node>, peer_name: &str, ip: Option<IpAddr>, list
         if !p.ips.contains(&ip_text) {
             p.ips.push(ip_text.clone());
         }
+        p.ip_seen.insert(ip_text.clone(), chrono::Utc::now().format("%Y-%m-%d").to_string());
         if p.url.is_empty() {
             let port = announced.iter().find(|a| a.0 == ip_text).map(|a| a.1).or(announced.first().map(|a| a.1))
                 // порт из любого объявленного адреса (даже 127.0.0.1): свой порт подставлять нельзя — можно попасть в себя
@@ -177,23 +178,49 @@ pub fn learn_address(node: &Arc<Node>, peer_name: &str, ip: Option<IpAddr>, list
     true
 }
 
-/// Сосед в hello перечислил свои адреса: недостающие — в белый список.
+/// Сосед в hello перечислил свои адреса: недостающие адреса своей сети (10.77.x.y) — в список: они нужны как запасной
+/// путь (3.18). Остальные (WSL, Docker и т. п.) записываются только при настоящем запросе с них (`learn_address`) —
+/// так список не зарастает адресами, которыми никто не пользуется.
 pub fn learn_announced(node: &Arc<Node>, peer_name: &str, listen: &str, from: Option<IpAddr>) {
     let add: Vec<String>;
+    let mut alt_set = String::new();
     {
         let _g = node.config_lock.lock();
         let mut cfg = node.cfg.write();
         let Some(p) = cfg.peer_mut(peer_name) else { return };
-        let mut a: Vec<String> = parse_announced(listen, from).into_iter().map(|x| x.0).filter(|x| !p.ips.contains(x)).collect();
+        // только адреса своей сети (10.77.x.y): прочие — когда с них придёт подписанный запрос
+        let mut net: Vec<String> = parse_announced(listen, from)
+            .into_iter()
+            .map(|x| x.0)
+            .filter(|x| x.parse::<std::net::Ipv4Addr>().map(bridge_core::mostnet::in_net).unwrap_or(false))
+            .collect();
+        net.dedup();
+        let mut a: Vec<String> = net.iter().filter(|x| !p.ips.contains(x)).cloned().collect();
         a.dedup();
-        if a.is_empty() {
+        // (3.19.2) запасной адрес пуст или устарел (был адресом своей сети, а сосед сообщает другой) — вписать сам
+        let alt = p.alt.trim().trim_start_matches("http://").split(':').next().unwrap_or("").to_string();
+        let alt_is_net = alt.parse::<std::net::Ipv4Addr>().map(bridge_core::mostnet::in_net).unwrap_or(false);
+        if let Some(v) = net.first() {
+            if p.alt.trim().is_empty() || (alt_is_net && !net.contains(&alt)) {
+                p.alt = v.clone();
+                alt_set = v.clone();
+            }
+        }
+        if a.is_empty() && alt_set.is_empty() {
             return;
         }
         p.ips.extend(a.iter().cloned());
         add = a;
     }
     let err = node.save_config();
-    node.info(&format!("Сосед «{}»: добавлены адреса {} (сообщил сам){}", peer_name, add.join(", "), err.map(|e| format!(" (не сохранено: {})", e)).unwrap_or_default()));
+    let mut what = Vec::new();
+    if !add.is_empty() {
+        what.push(format!("добавлены адреса {}", add.join(", ")));
+    }
+    if !alt_set.is_empty() {
+        what.push(format!("запасной адрес — {} (своя сеть)", alt_set));
+    }
+    node.info(&format!("Сосед «{}»: {} (сообщил сам){}", peer_name, what.join("; "), err.map(|e| format!(" (не сохранено: {})", e)).unwrap_or_default()));
 }
 
 /// Сосед назвался (подпись верна). Временное имя заменяется настоящим везде; давно знакомый — только предупреждение.
@@ -531,12 +558,57 @@ pub async fn contact(node: &Arc<Node>, peer: &PeerConfig) -> Option<HelloRespons
         });
         return None;
     }
-    let client = node.client_for(peer);
+    let mut client = node.client_for(peer);
     let kid = peer.key_id();
     // сосед мог переименоваться (назваться) во время запроса — состояние пишем под его нынешним именем
     let current = |node: &Arc<Node>| node.cfg.read().peer_by_key(&kid).map(|p| p.name.clone()).unwrap_or_else(|| peer.name.clone());
     let t0 = std::time::Instant::now();
-    match client.hello().await {
+    let in_use = node.peer_url(peer);
+    let mut res: Option<Result<HelloResponse, PeerError>> = None;
+    // работаем через запасной адрес — раз в 2 минуты проверить, не ожил ли основной
+    if in_use != peer.url && node.primary_due(&peer.name) {
+        if let Ok(h) = node.client_at(peer, &peer.url).hello().await {
+            node.set_peer_url(&peer.name, None);
+            node.info(&format!("Связь с «{}» — снова по основному адресу {}", peer.name, peer.url.trim_start_matches("http://")));
+            client = node.client_for(peer);
+            res = Some(Ok(h));
+        }
+    }
+    let mut res = match res {
+        Some(r) => r,
+        None => client.hello().await,
+    };
+    // адрес не отвечает — попробовать другие адреса соседа (запасной из настроек, его адреса в своей сети)
+    if matches!(res, Err(PeerError::Net(..))) {
+        let urls = node.peer_urls(peer);
+        let cur = node.peer_url(peer);
+        for u in urls.into_iter().filter(|u| *u != cur) {
+            if let Ok(h) = node.client_at(peer, &u).hello().await {
+                node.set_peer_url(&peer.name, if u == peer.url { None } else { Some(u.clone()) });
+                node.info(&format!("Связь с «{}» — через {} адрес {}", peer.name, if u == peer.url { "основной" } else { "запасной" }, u.trim_start_matches("http://")));
+                client = node.client_for(peer);
+                res = Ok(h);
+                break;
+            }
+        }
+    }
+    // (3.19.2) адрес, по которому в итоге связались, — всегда (и основной тоже)
+    let (via, via_main) = {
+        let u = node.peer_url(peer);
+        let main = u.trim_end_matches('/') == peer.url.trim_end_matches('/');
+        (u.trim_start_matches("http://").trim_end_matches('/').to_string(), main)
+    };
+    if let Ok(h) = &res {
+        let want = h.bulk;
+        node.with_peer_state(&current(node), |s| s.wants_bulk = want);
+    }
+    let files_via = node.bulk_url(peer).map(|u| u.trim_start_matches("http://").to_string()).unwrap_or_default();
+    if res.is_ok() {
+        if let Some((ip, _)) = config::parse_url(&node.peer_url(peer)) {
+            node.mark_ip(&peer.name, &canon_ip(ip).to_string());
+        }
+    }
+    match res {
         Ok(hello) => {
             let name = current(node);
             let before = node.peer_state(&name);
@@ -552,6 +624,10 @@ pub async fn contact(node: &Arc<Node>, peer: &PeerConfig) -> Option<HelloRespons
                 s.channels = hello.channels.clone();
                 s.agent = hello.agent.clone();
                 s.turn = hello.turn.clone();
+                s.relay = hello.relay.clone();
+                s.via = via.clone();
+                s.via_main = via_main;
+                s.files_via = files_via.clone();
                 s.assistant = hello.assistant.clone();
                 s.runners = hello.runners.clone();
                 s.avatar = hello.avatar.clone();

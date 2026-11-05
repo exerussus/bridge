@@ -136,6 +136,11 @@ pub fn routes() -> Router<Arc<Node>> {
         .route(&l("media/invites"), get(media_invites))
         .route(&l("media/presence"), get(media_presence))
         .route(&l("media/ice"), get(media_ice))
+        .route(&l("relay"), get(relay_get).post(relay_set))
+        .route(&l("relay/check"), post(relay_check))
+        .route(&l("mostnet"), get(mostnet_get).post(mostnet_set))
+        .route(&l("mostnet/install"), post(mostnet_install))
+        .route(&l("mostnet/uninstall"), post(mostnet_uninstall))
         .route(&l("media/local"), post(media_local))
         .route(&l("transfers"), get(transfers_get))
         .route(&l("changelog"), get(changelog))
@@ -362,7 +367,7 @@ pub fn overview_value(node: &Arc<Node>) -> Value {
                 .filter_map(|rt| rt.reports.lock().get(&p.name).filter(|r| !r.starts_with("ок")).map(|r| format!("{}: {}", rt.id, r)))
                 .collect();
             json!({
-                "name": p.name, "title": p.title, "url": p.url, "ips": p.ips, "enabled": p.enabled,
+                "name": p.name, "title": p.title, "url": p.url, "ips": p.ips, "ipSeen": p.ip_seen, "enabled": p.enabled, "alt": p.alt, "via": ps.via, "viaMain": ps.via_main, "filesVia": ps.files_via,
                 "online": ps.online, "lastSeen": ps.last_seen.map(|t| time::format(&t)), "latency": ps.latency_ms, "filesIn": ps.files_in,
                 "error": ps.error, "hint": ps.hint, "warning": ps.warning, "announcedName": ps.announced_name,
                 "pending": p.pending, "invite": p.pending && p.url.is_empty(), "keyId": p.key_id(), "version": ps.version, "legacy": ps.legacy,
@@ -555,6 +560,8 @@ pub struct PeerUpsert {
     pub port: Option<u16>,
     pub extra_ips: Option<Vec<String>>,
     pub secret: Option<String>,
+    /// Запасной адрес (ip[:порт]); пусто — убрать.
+    pub alt: Option<String>,
     pub enabled: Option<bool>,
     pub shares: Option<Vec<String>>,
     pub groups: Option<Vec<String>>,
@@ -570,6 +577,9 @@ fn apply_upsert(cfg: &mut NodeConfig, name: &str, r: &PeerUpsert) {
     }
     if let Some(e) = r.enabled {
         p.enabled = e;
+    }
+    if let Some(a) = &r.alt {
+        p.alt = a.trim().trim_start_matches("http://").trim_end_matches('/').to_string();
     }
     if let Some(s) = r.secret.as_ref().filter(|s| !s.trim().is_empty()) {
         p.secret = s.trim().into();
@@ -1147,6 +1157,7 @@ async fn mailbox_upload(State(node): St, Query(m): Q, req: Request) -> Response 
     crate::activity::record(&node, "files.sent", json!({ "bytes": std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0) }));
     // готов к отправке сразу
     bridge_core::files::set_mtime(&full, &(time::now() - chrono::Duration::seconds(5)));
+    node.mailbox.mark_ready(&full);
     node.mailbox.dirty.store(true, Ordering::SeqCst);
     node.notify_peers(vec![peer.name.clone()], "", "mailbox");
     let rel = path::relative(&dir, &full).unwrap_or(p);
@@ -1734,18 +1745,46 @@ fn unmask_all(msg: &mut Value, ip: &str) {
     }
 }
 
-/// Ретрансляторы для WebRTC: соседей (из их приветов) и свой — для телефона (по тому имени, по которому он открыл мост).
+/// Ретрансляторы для WebRTC: соседей (из их приветов), свой — для телефона (по тому имени, по которому он открыл мост),
+/// и свои серверы (most-relay: свой и те, которыми делятся соседи). Режим «всегда через сервер» — только серверы и
+/// `iceTransportPolicy: relay`.
 async fn media_ice(State(node): St, dev: Option<axum::Extension<crate::mobile::FromDevice>>) -> Response {
+    let rc = node.cfg.read().relay.clone();
+    let mut servers: Vec<bridge_core::relay::RelayInfo> = Vec::new();
+    if rc.mode != "off" {
+        if let Some(r) = node.relay.info(&rc) {
+            servers.push(r);
+        }
+        let names: Vec<String> = node.cfg.read().peers.iter().filter(|p| p.enabled).map(|p| p.name.clone()).collect();
+        for n in names {
+            let st = node.peer_state(&n);
+            if let (Some(r), true) = (st.relay, st.online) {
+                if !servers.iter().any(|s| s.host == r.host) {
+                    servers.push(r);
+                }
+            }
+        }
+    }
+    let mut srv_list: Vec<Value> = Vec::new();
+    for s in &servers {
+        if let Some(u) = s.stun_url() {
+            srv_list.push(json!({ "urls": [u] }));
+        }
+        srv_list.push(json!({ "urls": s.urls(), "username": s.username, "credential": s.credential }));
+    }
+    if rc.mode == "always" && !servers.is_empty() {
+        return ok_json(&json!({ "iceServers": srv_list, "iceTransportPolicy": "relay" }));
+    }
     let mut list: Vec<Value> = Vec::new();
     let port = node.turn.port.load(Ordering::SeqCst);
     if let Some(d) = &dev {
         if node.turn.running() && !d.host.is_empty() {
             let (u, c) = node.turn.creds(&format!("phone-{}", d.name), std::time::Duration::from_secs(12 * 3600));
-            list.push(json!({ "urls": [format!("turn:{}:{}?transport=udp", d.host, port)], "username": u, "credential": c }));
+            list.push(json!({ "urls": turn_urls(&d.host, port, node.turn.tcp.load(Ordering::SeqCst)), "username": u, "credential": c }));
         }
     }
     // телефону ретрансляторы соседей не нужны (Radmin и т. п. ему недоступны): только свой ПК
-    let peers: Vec<(String, String)> = if dev.is_some() { Vec::new() } else { node.cfg.read().peers.iter().filter(|p| p.enabled && p.has_url()).map(|p| (p.name.clone(), p.url.clone())).collect() };
+    let peers: Vec<(String, String)> = if dev.is_some() { Vec::new() } else { node.cfg.read().peers.iter().filter(|p| p.enabled && p.has_url()).map(|p| (p.name.clone(), node.peer_url(p))).collect() };
     for (name, url) in peers {
         let st = node.peer_state(&name);
         let (Some(t), true) = (st.turn, st.online) else { continue };
@@ -1754,9 +1793,158 @@ async fn media_ice(State(node): St, dev: Option<axum::Extension<crate::mobile::F
             std::net::IpAddr::V6(v) => format!("[{}]", v),
             v => v.to_string(),
         };
-        list.push(json!({ "urls": [format!("turn:{}:{}?transport=udp", host, t.port)], "username": t.username, "credential": t.credential }));
+        list.push(json!({ "urls": turn_urls(&host, t.port, t.tcp), "username": t.username, "credential": t.credential }));
     }
-    ok_json(&json!({ "iceServers": list }))
+    list.extend(srv_list);
+    ok_json(&json!({ "iceServers": list, "iceTransportPolicy": "all" }))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RelaySet {
+    invite: Option<String>,
+    mode: Option<String>,
+    share: Option<bool>,
+    files: Option<bool>,
+}
+
+/// Свой сервер-ретранслятор: состояние (ключ с сервера, ошибка, пинг) и настройки.
+async fn relay_get(State(node): St) -> Response {
+    let rc = node.cfg.read().relay.clone();
+    let mut st = node.relay.status.lock().clone();
+    st.configured = rc.configured();
+    st.address = rc.server.clone();
+    st.member = rc.member.clone();
+    st.mode = rc.mode.clone();
+    st.share = rc.share;
+    let used: Vec<Value> = {
+        let names: Vec<String> = node.cfg.read().peers.iter().filter(|p| p.enabled).map(|p| p.name.clone()).collect();
+        names
+            .into_iter()
+            .filter_map(|n| {
+                let s = node.peer_state(&n);
+                let r = s.relay.filter(|_| s.online)?;
+                Some(json!({ "peer": n, "name": r.name, "host": r.host }))
+            })
+            .collect()
+    };
+    ok_json(&json!({ "status": st, "fromPeers": used, "files": rc.files, "net": rc.net, "netUp": node.mostnet_up.load(std::sync::atomic::Ordering::Relaxed) }))
+}
+
+async fn relay_set(State(node): St, Json(b): Json<RelaySet>) -> Response {
+    if let Some(m) = &b.mode {
+        if !bridge_core::config::RelayConfig::mode_ok(m) {
+            return err(400, "режим: auto, always или off");
+        }
+    }
+    let line = b.invite.as_deref().map(str::trim).map(String::from);
+    if let Some(l) = &line {
+        if !l.is_empty() {
+            if let Err(e) = bridge_core::relay::RelayInvite::parse(l) {
+                return err(400, e);
+            }
+        }
+    }
+    {
+        let _g = node.config_lock.lock();
+        {
+            let mut c = node.cfg.write();
+            if let Some(m) = b.mode {
+                c.relay.mode = m;
+            }
+            if let Some(s) = b.share {
+                c.relay.share = s;
+            }
+            if let Some(f) = b.files {
+                c.relay.files = f;
+            }
+        }
+        if let Some(e) = node.save_config() {
+            return err(500, e);
+        }
+    }
+    let st = match line.as_deref() {
+        Some("") => {
+            if let Some(e) = crate::relay::forget(&node) {
+                return err(500, e);
+            }
+            crate::relay::RelayStatus::default()
+        }
+        Some(l) => match crate::relay::join(&node, l).await {
+            Ok(st) => st,
+            Err(e) => return err(400, e),
+        },
+        None => node.relay.status.lock().clone(),
+    };
+    // своя сеть ходит через тот же сервер и ключ — сообщить службе (если она есть)
+    let n2 = node.clone();
+    tokio::spawn(async move {
+        let _ = crate::mostnet::push(&n2).await;
+    });
+    ok_json(&json!({ "ok": true, "status": st }))
+}
+
+async fn relay_check(State(node): St) -> Response {
+    ok_json(&json!({ "status": crate::relay::check(&node).await }))
+}
+
+/// Своя локальная сеть: служба на этом ПК (есть ли, состояние, соседи) и включена ли в мосте.
+async fn mostnet_get(State(node): St) -> Response {
+    let rc = node.cfg.read().relay.clone();
+    let svc = crate::mostnet::status().await;
+    crate::mostnet::note(&node, &svc);
+    let log = if svc.is_some() { crate::mostnet::logs().await.into_iter().rev().take(30).collect::<Vec<_>>() } else { Vec::new() };
+    ok_json(&json!({
+        "windows": cfg!(windows), "exe": crate::mostnet::exe().is_some(), "service": svc, "enabled": rc.net,
+        "version": bridge_core::APP_VERSION, "relay": rc.configured(), "relayOff": rc.mode == "off", "installLog": crate::mostnet::install_log(), "log": log,
+    }))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct NetSet {
+    enabled: Option<bool>,
+}
+
+async fn mostnet_set(State(node): St, Json(b): Json<NetSet>) -> Response {
+    if let Some(en) = b.enabled {
+        let _g = node.config_lock.lock();
+        node.cfg.write().relay.net = en;
+        if let Some(e) = node.save_config() {
+            return err(500, e);
+        }
+    }
+    match crate::mostnet::push(&node).await {
+        Ok(v) => ok_json(&json!({ "ok": true, "service": v })),
+        Err(e) => ok_json(&json!({ "ok": true, "warning": e })),
+    }
+}
+
+async fn mostnet_install(State(node): St) -> Response {
+    match crate::mostnet::install(false).await {
+        Ok(t) => {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let _ = crate::mostnet::push(&node).await;
+            ok_json(&json!({ "ok": true, "log": t }))
+        }
+        Err(e) => err(400, e),
+    }
+}
+
+async fn mostnet_uninstall(State(_node): St) -> Response {
+    match crate::mostnet::install(true).await {
+        Ok(t) => ok_json(&json!({ "ok": true, "log": t })),
+        Err(e) => err(400, e),
+    }
+}
+
+/// Адреса одного ретранслятора: UDP и, если он умеет, TCP (когда UDP между ПК не проходит — например, в Radmin).
+fn turn_urls(host: &str, port: u16, tcp: bool) -> Vec<String> {
+    let mut v = vec![format!("turn:{}:{}?transport=udp", host, port)];
+    if tcp {
+        v.push(format!("turn:{}:{}?transport=tcp", host, port));
+    }
+    v
 }
 
 /// Сообщение панелям этого же ПК (и телефонам): «зашёл в канал с другого устройства» и т. п.
@@ -1816,6 +2004,7 @@ async fn api_index() -> Response {
             "GET ignore", "POST ignore {scope, id, peer, patterns}", "POST ignore/add|remove {scope, id, peer, pattern}", "GET ignore/test?path[&scope&id&peer]",
             "GET records[?share&type&status&assignee&q]", "GET records/{id}", "GET records/{id}/history", "POST actions {action, …}", "GET wait?share&after&timeout",
             "GET channels", "POST channels {id, title, members:[сосед|@группа|*]}", "POST channels/remove?id", "GET media/presence — кто в каком канале и что делает",
+            "GET relay — свой сервер-ретранслятор (most-relay); POST relay {invite?: строка с сервера (5 минут, один раз) | \"\" — отключить, mode?: auto|always|off, share?}; POST relay/check", "GET mostnet — своя локальная сеть (служба most-net, адрес 10.77.x.y, соседи); POST mostnet {enabled}; POST mostnet/install | mostnet/uninstall (Windows, подтверждение администратора)",
             "GET transfers — идущие передачи (процент, скорость, осталось)", "POST folders/settings?upMbit&downMbit&maxFileMb&trashMinutes",
             "POST mailbox/send {peer, path, dest?}", "GET changelog", "GET agent", "POST agent/ask {peer, prompt, thread?}", "GET agent/wait?id&after&timeout", "POST agent/stop?id", "POST agent/request {thread, question, buttons?, input?}", "GET agent/request/wait?thread&id&timeout", "POST agent/answer {thread, req, answer}",
             "POST sync", "GET log?lines", "POST media/signal {to, type, room, …}", "GET media/stream (SSE)", "POST open?target",
@@ -2306,6 +2495,7 @@ async fn mailbox_send(State(node): St, Json(v): Json<Value>) -> Response {
     }
     match std::fs::copy(&src, &full) {
         Ok(n) => {
+            node.mailbox.mark_ready(&full);
             node.mailbox.dirty.store(true, std::sync::atomic::Ordering::SeqCst);
             node.notify_peers(vec![peer.clone()], "", "mailbox");
             ok_json(&json!({ "ok": true, "path": rel, "size": n }))

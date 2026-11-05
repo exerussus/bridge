@@ -19,6 +19,7 @@ doc = false
 
 [dependencies]
 bridge-core = { path = "../core" }
+bridge-turn = { path = "../turn" }
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true

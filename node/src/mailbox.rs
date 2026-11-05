@@ -4,16 +4,26 @@
 use crate::node::Node;
 use bridge_core::config::{NodeConfig, PeerConfig};
 use bridge_core::proto::{FileEntry, MailboxAck, MailboxEvent};
-use bridge_core::scanner::walk;
+use bridge_core::scanner::{walk, Walked};
 use bridge_core::{path, time};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// (3.19.1) Пустой файл уходит, только если пролежал пустым столько по часам моста: его могли только создать
+/// (загрузка, копирование по сети), а содержимое придёт позже.
+const EMPTY_WAIT: Duration = Duration::from_secs(300);
 
 pub struct Mailbox {
     sha_cache: Mutex<HashMap<PathBuf, (i64, i64, String)>>,
+    /// (3.19.1) Файл → (размер, время, с какого момента мы видим его таким). Готовность считаем по своим часам:
+    /// при копировании Windows ставит время источника, и недокопированный файл выглядит «старым».
+    seen: Mutex<HashMap<PathBuf, (i64, i64, Instant)>>,
+    /// Есть файлы, которые ещё не готовы к отправке, — главный цикл проверяет их каждую секунду.
+    pub waiting: AtomicBool,
     history: Mutex<Vec<MailboxEvent>>,
     gate: tokio::sync::Mutex<()>,
     signature: Mutex<String>,
@@ -34,6 +44,8 @@ impl Mailbox {
     pub fn new() -> Self {
         Mailbox {
             sha_cache: Mutex::new(HashMap::new()),
+            seen: Mutex::new(HashMap::new()),
+            waiting: AtomicBool::new(false),
             history: Mutex::new(Vec::new()),
             gate: tokio::sync::Mutex::new(()),
             signature: Mutex::new(String::new()),
@@ -42,6 +54,25 @@ impl Mailbox {
             wake: AtomicBool::new(false),
             dirty: AtomicBool::new(true),
         }
+    }
+
+    /// Готов ли файл к отправке: не менялся (размер и время) settle секунд по нашим наблюдениям, пустой — EMPTY_WAIT.
+    fn is_ready(&self, node: &Node, w: &Walked) -> bool {
+        let need = if w.size == 0 { EMPTY_WAIT } else { Duration::from_secs_f64(node.settle_secs.max(0.0)) };
+        let mut s = self.seen.lock();
+        let e = s.entry(w.full.clone()).or_insert((w.size, w.mtime_ticks, Instant::now()));
+        if e.0 != w.size || e.1 != w.mtime_ticks {
+            *e = (w.size, w.mtime_ticks, Instant::now());
+        }
+        e.2.elapsed() >= need
+    }
+
+    /// Файл положил сам мост и он уже целиком (загрузка из панели, сборка, «отправить файл») — можно отдавать сразу.
+    pub fn mark_ready(&self, full: &Path) {
+        let Ok(m) = std::fs::metadata(full) else { return };
+        let ticks = m.modified().map(|t| time::to_ticks(&time::from_system(t))).unwrap_or(0);
+        let since = Instant::now().checked_sub(Duration::from_secs(3600)).unwrap_or_else(Instant::now);
+        self.seen.lock().insert(full.to_path_buf(), (m.len() as i64, ticks, since));
     }
 
     pub fn outgoing_root(&self, node: &Node, cfg: &NodeConfig) -> PathBuf {
@@ -129,6 +160,11 @@ impl Mailbox {
                 if now - w.mtime_ticks < if w.size == 0 { settle * 5 } else { settle } {
                     continue;
                 }
+                // (3.19.1) ещё копируется или пока пустой — не отдаём, ждём, пока придёт содержимое
+                if !self.is_ready(node, &w) {
+                    self.waiting.store(true, Ordering::SeqCst);
+                    continue;
+                }
                 let cached = self.sha_cache.lock().get(&w.full).filter(|c| c.0 == w.size && c.1 == w.mtime_ticks).map(|c| c.2.clone());
                 let sha = match cached {
                     Some(s) => s,
@@ -170,14 +206,24 @@ impl Mailbox {
     pub fn outgoing_changed(&self, node: &Node) -> bool {
         let root = self.out_root(node);
         if !node.cfg.read().mailbox.enabled || !root.is_dir() {
+            self.waiting.store(false, Ordering::SeqCst);
             return false;
         }
-        let (mut n, mut size, mut ticks) = (0i64, 0i64, 0i64);
+        // в подпись — только готовые файлы: как только недокопированный файл «дозреет», соседи получат весть
+        let (mut n, mut size, mut ticks, mut waiting) = (0i64, 0i64, 0i64, false);
+        let mut present = HashSet::new();
         for w in walk(&root, &[]) {
+            present.insert(w.full.clone());
+            if !self.is_ready(node, &w) {
+                waiting = true;
+                continue;
+            }
             n += 1;
             size += w.size;
             ticks ^= w.mtime_ticks;
         }
+        self.seen.lock().retain(|k, _| present.contains(k));
+        self.waiting.store(waiting, Ordering::SeqCst);
         let sig = format!("{}|{}|{}", n, size, ticks);
         let mut g = self.signature.lock();
         if *g == sig {
