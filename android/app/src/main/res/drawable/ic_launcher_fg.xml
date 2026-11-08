@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Временный значок: арка моста. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#00000000" android:strokeColor="#FF38E1F0" android:strokeWidth="5"
+        android:pathData="M30,66 Q54,30 78,66" />
+    <path android:fillColor="#00000000" android:strokeColor="#FF38E1F0" android:strokeWidth="5"
+        android:pathData="M26,66 L82,66 M40,66 L40,52 M54,66 L54,46 M68,66 L68,52" />
+</vector>

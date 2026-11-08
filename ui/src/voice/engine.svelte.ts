@@ -72,7 +72,7 @@ export function myState() {
 export const onlinePeers = () => (ui.ov ? ui.ov.peers : []).filter((p: any) => p.enabled && !p.invite && !p.pending);
 
 // ── сигналы ──
-export async function signal(to: string, msg: any) { return api('POST', 'media/signal', Object.assign({ to }, msg)); }
+export async function signal(to: string, msg: any) { return api('POST', 'media/signal', Object.assign({}, msg, { to })); }
 const SENDQ: Record<string, Promise<any>> = {};
 /** Сообщения одному собеседнику уходят строго по очереди (описание сессии раньше своих ICE-кандидатов). */
 export function rsend(to: string, msg: any, room?: string) {
@@ -330,7 +330,7 @@ function link(n: string) {
   pc.onnegotiationneeded = async () => {
     try { L.making = true; await pc.setLocalDescription(); await rsend(n, { type: 'sdp', pc: L.id, desc: pc.localDescription!.toJSON() }); } catch {} finally { L.making = false; }
   };
-  pc.onicecandidate = e => { if (e.candidate) rsend(n, { type: 'ice', pc: L.id, to: L.rid || undefined, candidate: e.candidate.toJSON() }).catch(() => {}); };
+  pc.onicecandidate = e => { if (e.candidate) rsend(n, { type: 'ice', pc: L.id, rpc: L.rid || undefined, candidate: e.candidate.toJSON() }).catch(() => {}); };
   pc.ontrack = e => {
     const s = e.streams[0];
     if (!s) return;
@@ -709,8 +709,8 @@ async function onRoom(m: any) {
     // собеседник начал соединение заново (новый номер) — и мы с чистого листа
     let fresh = !R.pcs[n]; // соединения не было (или его закрыли перед «relink») — после ответа добавить своё
     if (R.pcs[n] && m.pc && R.pcs[n].rid && R.pcs[n].rid !== m.pc && m.desc.type === 'offer') { closeLink(n); fresh = true; }
-    // (3.22.1) ответ на предложение другого (уже закрытого) нашего соединения — не наш; `to` шлёт Мост ≥ 3.22.1
-    if (m.desc.type === 'answer' && m.to && (!R.pcs[n] || R.pcs[n].id !== m.to)) return;
+    // (3.22.1) ответ на предложение другого (уже закрытого) нашего соединения — не наш; `rpc` шлёт Мост ≥ 3.22.1
+    if (m.desc.type === 'answer' && m.rpc && (!R.pcs[n] || R.pcs[n].id !== m.rpc)) return;
     const L = link(n), pc = L.pc, desc = m.desc;
     if (m.pc) L.rid = m.pc;
     if (ORPH[n]) { for (const o of ORPH[n]) if (o.pc === L.rid) L.early.push(o.c); delete ORPH[n]; }
@@ -720,14 +720,14 @@ async function onRoom(m: any) {
     try {
       await pc.setRemoteDescription(desc);
       for (const c of L.early.splice(0)) try { await pc.addIceCandidate(c); } catch {}
-      if (desc.type === 'offer') { await pc.setLocalDescription(); await rsend(n, { type: 'sdp', pc: L.id, to: L.rid, desc: pc.localDescription.toJSON() }); if (fresh) syncLink(n); }
+      if (desc.type === 'offer') { await pc.setLocalDescription(); await rsend(n, { type: 'sdp', pc: L.id, rpc: L.rid, desc: pc.localDescription.toJSON() }); if (fresh) syncLink(n); }
     } catch (e) { console.warn('sdp', e); }
   } else if (m.type === 'ice') {
     // (3.22.1) соединения нет (закрыли перед «relink») — кандидат от старого соединения собеседника; новое
     // соединение пришлёт свои после предложения. Раньше тут создавалось пустое соединение.
     const L = R.pcs[n];
     if (!L) { if (m.pc) (ORPH[n] = (ORPH[n] || []).slice(-30)).push({ pc: m.pc, c: m.candidate }); return; }
-    if (m.to && m.to !== L.id) return;
+    if (m.rpc && m.rpc !== L.id) return;
     if (m.pc && L.rid && m.pc !== L.rid) return;
     if (!L.pc.remoteDescription) { L.early.push(m.candidate); return; } // кандидат раньше описания — придержать
     try { await L.pc.addIceCandidate(m.candidate); } catch (e) { if (!L.ignore) console.warn('ice', e); }

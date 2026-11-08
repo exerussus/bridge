@@ -2620,6 +2620,70 @@ async fn build_delivery_report_and_run_own() {
     net.stop().await;
 }
 
+/// 3.23: version.json сборки (AppCore) — читается из корня папки, едет к получателю, отчёт возвращает версию отправителю.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn build_app_version() {
+    // разбор: только известные поля, мусор отсеивается, нет файла / нет version — None
+    let tmp = std::env::temp_dir().join(format!("most-appver-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let tmp = tmp.as_path();
+    assert!(bridge_node::builds::app_info(tmp).is_none(), "нет файла — нормально");
+    std::fs::write(tmp.join("version.json"), "{не json").unwrap();
+    assert!(bridge_node::builds::app_info(tmp).is_none());
+    std::fs::write(tmp.join("version.json"), r#"{"fullVersion":"x"}"#).unwrap();
+    assert!(bridge_node::builds::app_info(tmp).is_none(), "без version");
+    std::fs::write(tmp.join("version.json"), "\u{feff}{\"version\":\" 1.2\\u0007\",\"hash\":\"<script>\",\"dirty\":\"yes\",\"builtAtUtc\":\"вчера\",\"extra\":1,\"profile\":\"Win\"}").unwrap();
+    assert_eq!(bridge_node::builds::app_info(tmp).unwrap(), json!({ "version": "1.2", "profile": "Win" }));
+    std::fs::write(tmp.join("version.json"), vec![b' '; 70 * 1024]).unwrap();
+    assert!(bridge_node::builds::app_info(tmp).is_none(), "слишком большой");
+
+    let mut net = pair();
+    net.start().await;
+    net.sync(1, &["stand", "dev"]).await;
+    let (dev, stand) = (net.n("dev").clone(), net.n("stand").clone());
+    let src = net.root.join("dev-build-app");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("Game.exe"), b"exe").unwrap();
+    let vj = |v: &str, h: &str, dirty: bool| format!(r#"{{"version":"{v}","fullVersion":"{v}+{h}{}","hash":"{h}","dirty":{dirty},"profile":"Windows IL2CPP","platform":"StandaloneWindows64","development":false,"builtAtUtc":"2026-11-08T18:19:44Z"}}"#, if dirty { "-dirty" } else { "" });
+    std::fs::write(src.join("version.json"), vj("0.11.0", "3493910", true)).unwrap();
+    bridge_node::builds::set_presets(&dev, &json!([{ "id": "g", "name": "App", "path": src.to_str().unwrap(), "peers": ["stand"], "exe": "Game.exe" }])).unwrap();
+    let pre = |n: &std::sync::Arc<bridge_node::Node>| bridge_node::builds::status(n)["presets"][0].clone();
+    assert_eq!(pre(&dev)["app"]["version"], "0.11.0", "папка: {}", pre(&dev));
+    assert_eq!(bridge_node::builds::preview(&dev, src.to_str().unwrap(), &[]).unwrap()["app"]["hash"], "3493910");
+    bridge_node::builds::send_preset(&dev, "g", None, "").unwrap();
+    for _ in 0..100 { if dev.builds.jobs.lock().is_empty() && pre(&dev)["latest"]["n"] == 1 { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    let p = pre(&dev);
+    assert_eq!((p["latest"]["app"]["version"].clone(), p["latest"]["app"]["dirty"].clone()), (json!("0.11.0"), json!(true)), "у версии: {}", p);
+    assert_eq!(bridge_node::builds::status(&dev)["history"][0]["app"]["fullVersion"], "0.11.0+3493910-dirty");
+    net.sync(1, &["stand"]).await;
+    let target = stand.base_dir.join("builds").join("App");
+    for _ in 0..100 { if bridge_node::builds::status(&stand)["received"][0]["lastOk"]["app"].is_object() { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    let r = bridge_node::builds::status(&stand)["received"][0].clone();
+    assert_eq!((r["lastOk"]["app"]["version"].clone(), r["lastOk"]["app"]["platform"].clone(), r["lastOk"]["app"]["builtAtUtc"].clone()), (json!("0.11.0"), json!("StandaloneWindows64"), json!("2026-11-08T18:19:44Z")), "{}", r);
+    assert!(target.join("version.json").exists(), "сам файл — обычный файл сборки");
+    let rep = bridge_node::builds::report_for(&stand, "dev");
+    assert_eq!((rep[0].app.as_str(), rep[0].app_dirty), ("0.11.0", true));
+    net.sync(1, &["dev"]).await;
+    let mut d = json!(null);
+    for _ in 0..100 { d = pre(&dev)["delivery"][0].clone(); if d["state"] == "unpacked" { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    assert_eq!((d["app"]["version"].clone(), d["app"]["dirty"].clone()), (json!("0.11.0"), json!(true)), "у получателя: {}", d);
+    // файл убрали (AppCore его не всегда пишет) — версия без сведений: и у отправителя, и у получателя (старый version.json в его папке не в счёт)
+    std::fs::remove_file(src.join("version.json")).unwrap();
+    std::fs::write(src.join("Game.exe"), b"exe2").unwrap();
+    assert!(pre(&dev)["app"].is_null());
+    bridge_node::builds::send_preset(&dev, "g", None, "").unwrap();
+    for _ in 0..100 { if dev.builds.jobs.lock().is_empty() && pre(&dev)["latest"]["n"] == 2 { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    assert!(pre(&dev)["latest"]["app"].is_null(), "{}", pre(&dev));
+    assert!(bridge_node::builds::status(&dev)["history"][0]["app"].is_null());
+    net.sync(1, &["stand"]).await;
+    for _ in 0..100 { if bridge_node::builds::status(&stand)["received"][0]["lastOk"]["n"] == 2 { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    let r = bridge_node::builds::status(&stand)["received"][0].clone();
+    assert_eq!(r["lastOk"]["n"], 2, "{}", r);
+    assert!(r["lastOk"]["app"].is_null(), "{}", r);
+    assert_eq!(bridge_node::builds::report_for(&stand, "dev")[0].app, "");
+    net.stop().await;
+}
+
 /// 3.21.1: приглашение — адрес этого ПК выбирается (лучший первым, можно свой); строка — с выбранным.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn invite_chosen_address() {

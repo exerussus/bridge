@@ -76,6 +76,55 @@ pub fn clean_exe(p: &str) -> Result<String, String> {
     path::norm(p).ok_or_else(|| "программа — путь внутри папки сборки (например, Game.exe или bin/Game.exe)".to_string())
 }
 
+/// (3.23) Сведения о сборке программы — `version.json` в корне папки сборки (его пишет AppCore при сборке Unity).
+/// Файла может не быть — это нормально (None). Битый, слишком большой или без `version` — тоже None.
+pub const APP_FILE: &str = "version.json";
+const APP_MAX_BYTES: u64 = 64 * 1024;
+
+pub fn app_info(dir: &Path) -> Option<Value> {
+    let f = dir.join(APP_FILE);
+    let md = std::fs::metadata(&f).ok()?;
+    if !md.is_file() || md.len() > APP_MAX_BYTES {
+        return None;
+    }
+    let s = std::fs::read(&f).ok()?;
+    let s = s.strip_prefix(b"\xEF\xBB\xBF".as_slice()).unwrap_or(&s);
+    let v: Value = serde_json::from_slice(s).ok()?;
+    clean_app(&v)
+}
+
+/// Только известные поля, строки — без управляющих символов и ограниченной длины (META из чужого архива — не доверяем).
+pub fn clean_app(v: &Value) -> Option<Value> {
+    let o = v.as_object()?;
+    let txt = |k: &str, max: usize| -> Option<String> {
+        let t: String = o.get(k)?.as_str()?.trim().chars().filter(|c| !c.is_control()).take(max).collect();
+        (!t.is_empty()).then_some(t)
+    };
+    let version = txt("version", 64)?;
+    let mut out = serde_json::Map::new();
+    out.insert("version".into(), json!(version));
+    if let Some(x) = txt("fullVersion", 128) {
+        out.insert("fullVersion".into(), json!(x));
+    }
+    if let Some(x) = txt("hash", 64).filter(|h| h.chars().all(|c| c.is_ascii_alphanumeric())) {
+        out.insert("hash".into(), json!(x.to_lowercase()));
+    }
+    for k in ["profile", "platform"] {
+        if let Some(x) = txt(k, 64) {
+            out.insert(k.into(), json!(x));
+        }
+    }
+    for k in ["dirty", "development"] {
+        if let Some(b) = o.get(k).and_then(|b| b.as_bool()) {
+            out.insert(k.into(), json!(b));
+        }
+    }
+    if let Some(t) = txt("builtAtUtc", 40).filter(|t| chrono::DateTime::parse_from_rfc3339(t).is_ok()) {
+        out.insert("builtAtUtc".into(), json!(t));
+    }
+    Some(Value::Object(out))
+}
+
 /// Похожее на запускаемое в папке сборки (для подсказки в заготовке).
 fn exe_candidates(src: &Path, ig: &BuildIgnore) -> Vec<String> {
     let mut v: Vec<String> = bridge_core::scanner::walk(src, &[])
@@ -538,7 +587,7 @@ pub fn preview(node: &Node, src: &str, ignore: &[String]) -> Result<Value, Strin
     let mut rules: Vec<Value> = by.into_iter().map(|(r, (n, b, ex))| json!({ "rule": r, "files": n, "bytes": b, "example": ex })).collect();
     rules.sort_by(|a, b| b["bytes"].as_i64().cmp(&a["bytes"].as_i64()));
     let (ign_f, ign_b) = rules.iter().fold((0i64, 0i64), |a, r| (a.0 + r["files"].as_i64().unwrap_or(0), a.1 + r["bytes"].as_i64().unwrap_or(0)));
-    Ok(json!({ "files": files, "bytes": bytes, "ignoredFiles": ign_f, "ignoredBytes": ign_b, "rules": rules, "biggest": biggest.into_iter().take(8).map(|(s, p)| json!({ "path": p, "bytes": s })).collect::<Vec<_>>(), "exes": exe_candidates(&src, &ig) }))
+    Ok(json!({ "files": files, "bytes": bytes, "ignoredFiles": ign_f, "ignoredBytes": ign_b, "rules": rules, "biggest": biggest.into_iter().take(8).map(|(s, p)| json!({ "path": p, "bytes": s })).collect::<Vec<_>>(), "exes": exe_candidates(&src, &ig), "app": app_info(&src) }))
 }
 
 /// Отправить по заготовке всем её получателям.
@@ -617,7 +666,7 @@ fn versions(node: &Node, key: &str, name: &str, seed: bool) -> Vec<Value> {
 /// (3.22) `extra` — номера и отпечатки, известные по получателям (общая сборка: её патчат и соавторы):
 /// следующий номер — за самым большим из всех, а тот же набор файлов, что у последней известной, — её номер.
 #[allow(clippy::too_many_arguments)]
-fn version_for(node: &Node, key: &str, name: &str, seed: bool, now: &BTreeMap<String, String>, note: &str, extra: &[(u64, String)]) -> (u64, String) {
+fn version_for(node: &Node, key: &str, name: &str, seed: bool, now: &BTreeMap<String, String>, note: &str, extra: &[(u64, String)], app: &Option<Value>) -> (u64, String) {
     let _g = node.builds.ver_lock.lock();
     let d = digest_of(now);
     let mut list = versions(node, key, name, seed);
@@ -634,6 +683,10 @@ fn version_for(node: &Node, key: &str, name: &str, seed: bool, now: &BTreeMap<St
             if !list.iter().any(|x| x["n"].as_u64() == Some(n)) {
                 list.push(json!({ "n": n, "digest": d, "at": time::format(&time::now()), "files": now.len(), "note": note }));
             }
+            // (3.23) сведения о программе — у версии (version.json мог лежать в игноре и не менять отпечаток)
+            if let (Some(a), Some(e)) = (app, list.iter_mut().find(|x| x["n"].as_u64() == Some(n))) {
+                e["app"] = a.clone();
+            }
             let kept = l["note"].as_str().unwrap_or("").to_string();
             if !note.is_empty() && kept.is_empty() {
                 if let Some(e) = list.iter_mut().find(|x| x["n"].as_u64() == Some(n)) {
@@ -644,7 +697,11 @@ fn version_for(node: &Node, key: &str, name: &str, seed: bool, now: &BTreeMap<St
         }
         _ => {
             let n = max.saturating_add(1).min(MAX_N);
-            list.push(json!({ "n": n, "digest": d, "at": time::format(&time::now()), "files": now.len(), "note": note }));
+            let mut e = json!({ "n": n, "digest": d, "at": time::format(&time::now()), "files": now.len(), "note": note });
+            if let Some(a) = app {
+                e["app"] = a.clone();
+            }
+            list.push(e);
             (n, note.to_string())
         }
     };
@@ -779,6 +836,9 @@ pub fn status(node: &Node) -> Value {
             p["mine"] = json!(mine_p);
             p["delivery"] = json!(peers.iter().map(|peer| delivery(node, &name, &gid, peer, ln, &tr)).collect::<Vec<_>>());
             p["running"] = json!(running(node, OWN, &id));
+            // (3.23) version.json в папке сборки сейчас (что уйдёт со следующей отправкой)
+            let path = p["path"].as_str().unwrap_or("").trim().to_string();
+            p["app"] = json!(if path.is_empty() { None } else { app_info(Path::new(&path)) });
             p
         })
         .collect();
@@ -838,6 +898,10 @@ fn delivery(node: &Node, name: &str, gid: &str, peer: &str, latest: u64, tr: &[V
     d["state"] = json!(state);
     if let Some(r) = rep {
         d["at"] = json!(r.at);
+        // (3.23) какая версия программы у него стоит
+        if !r.app.is_empty() {
+            d["app"] = json!({ "version": r.app, "dirty": r.app_dirty });
+        }
     }
     d
 }
@@ -888,6 +952,11 @@ pub fn adopt(node: &Node, gid: &str, path: &str) -> Result<Value, String> {
     Ok(json!({ "ok": true, "id": id, "name": name, "peers": peers }))
 }
 
+/// (3.23) Короткая версия программы для отчёта: «0.11.0» и «с незакоммиченными правками».
+fn app_of(a: &Value) -> (String, bool) {
+    (a["version"].as_str().unwrap_or("").chars().take(64).collect(), a["dirty"].as_bool().unwrap_or(false))
+}
+
 /// (3.21) Отчёт для привета соседу `peer`: его сборки у нас — последняя версия каждой и распаковалась ли.
 pub fn report_for(node: &Node, peer: &str) -> Vec<bridge_core::proto::BuildReport> {
     let h = read(&history_file(node));
@@ -897,7 +966,9 @@ pub fn report_for(node: &Node, peer: &str) -> Vec<bridge_core::proto::BuildRepor
         let name = e["name"].as_str().unwrap_or("").to_string();
         let ok = e["error"].is_null();
         let n = e["n"].as_u64().unwrap_or_else(|| by.get(&name).map(|b| b.n).unwrap_or(0));
-        by.insert(name.clone(), bridge_core::proto::BuildReport { name, n, ok, error: e["error"].as_str().unwrap_or("").chars().take(300).collect(), at: e["at"].as_str().unwrap_or("").into(), ..Default::default() });
+        // (3.23) версия программы — та, что стоит: при ошибке остаётся от прошлой удачной
+        let (app, app_dirty) = if ok { app_of(&e["app"]) } else { by.get(&name).map(|b| (b.app.clone(), b.app_dirty)).unwrap_or_default() };
+        by.insert(name.clone(), bridge_core::proto::BuildReport { name, n, ok, error: e["error"].as_str().unwrap_or("").chars().take(300).collect(), at: e["at"].as_str().unwrap_or("").into(), app, app_dirty, ..Default::default() });
     }
     let mut out: Vec<_> = by.into_values().collect();
     // (3.22) общие сборки — автору и каждому соавтору: что стоит (номер и отпечаток набора)
@@ -918,6 +989,8 @@ pub fn report_for(node: &Node, peer: &str) -> Vec<bridge_core::proto::BuildRepor
             at: last.and_then(|e| e["at"].as_str()).or(r["at"].as_str()).unwrap_or("").into(),
             gid: gid.clone(),
             digest: r["digest"].as_str().unwrap_or("").into(),
+            app: app_of(&r["app"]).0,
+            app_dirty: app_of(&r["app"]).1,
         });
     }
     out
@@ -1128,7 +1201,9 @@ fn pack(node: &Arc<Node>, peer: &str, src: &Path, name: &str, mode: &str, key: &
     let gid = pre["gid"].as_str().unwrap_or("").to_string();
     let vkey = if gid.is_empty() { name.to_string() } else { gid.clone() };
     let seed = gid.is_empty() || eq_ic(pre["owner"].as_str().unwrap_or(""), &node.node_name());
-    let (n, note) = version_for(node, &vkey, name, seed, &now, note, &known_versions(node, &gid, &trusted_of(pre)));
+    // (3.23) version.json сборки (AppCore) — едет в META, в историю и к версии
+    let app = app_info(src);
+    let (n, note) = version_for(node, &vkey, name, seed, &now, note, &known_versions(node, &gid, &trusted_of(pre)), &app);
     let mut first = prev.is_empty();
     let has = if gid.is_empty() { None } else { node.peer_state(peer).builds.iter().find(|b| b.gid == gid && is_digest(&b.digest)).cloned() };
     if let Some(r) = has {
@@ -1142,7 +1217,7 @@ fn pack(node: &Arc<Node>, peer: &str, src: &Path, name: &str, mode: &str, key: &
     if pick.is_empty() {
         // у соседа уже ровно эта версия — не ошибка
         write(&sf, &json!({ "files": now, "at": prev_v["at"], "n": n }));
-        return Ok(json!({ "dir": "out", "peer": peer, "name": name, "mode": mode, "at": time::format(&time::now()), "files": 0, "all": now.len(), "bytes": 0, "zip": 0, "src": src.display().to_string(), "already": true, "exe": exe, "note": note, "n": n, "gid": gid }));
+        return Ok(json!({ "dir": "out", "peer": peer, "name": name, "mode": mode, "at": time::format(&time::now()), "files": 0, "all": now.len(), "bytes": 0, "zip": 0, "src": src.display().to_string(), "already": true, "exe": exe, "note": note, "n": n, "gid": gid, "app": app }));
     }
     let note = note.as_str();
     let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
@@ -1158,6 +1233,8 @@ fn pack(node: &Arc<Node>, peer: &str, src: &Path, name: &str, mode: &str, key: &
         let mut z = zip::ZipWriter::new(std::io::BufWriter::new(f));
         let opt = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated).compression_level(Some(3)).large_file(true);
         let mut meta = json!({ "name": name, "mode": mode, "from": node.node_name(), "at": time::format(&time::now()), "files": pick.len(), "all": now.len(), "first": first, "exe": exe, "note": note, "n": n });
+        // (3.23) всегда — и null: так получатель знает, что отправитель version.json искал и не нашёл
+        meta["app"] = json!(app);
         if !gid.is_empty() {
             meta["gid"] = json!(gid);
             meta["owner"] = pre["owner"].clone();
@@ -1198,7 +1275,7 @@ fn pack(node: &Arc<Node>, peer: &str, src: &Path, name: &str, mode: &str, key: &
     node.mailbox.mark_ready(&out);
     // отпечатки — «что у соседа» после этой отправки
     write(&sf, &json!({ "files": now, "at": time::format(&time::now()), "n": n }));
-    Ok(json!({ "dir": "out", "peer": peer, "name": name, "mode": if first && mode == "patch" { "clean" } else { mode }, "at": time::format(&time::now()), "files": pick.len(), "all": now.len(), "bytes": bytes, "zip": zsize, "src": src.display().to_string(), "first": first, "skipped": skipped, "exe": exe, "note": note, "n": n, "gid": gid }))
+    Ok(json!({ "dir": "out", "peer": peer, "name": name, "mode": if first && mode == "patch" { "clean" } else { mode }, "at": time::format(&time::now()), "files": pick.len(), "all": now.len(), "bytes": bytes, "zip": zsize, "src": src.display().to_string(), "first": first, "skipped": skipped, "exe": exe, "note": note, "n": n, "gid": gid, "app": app }))
 }
 
 // ───────────── приём ─────────────
@@ -1373,6 +1450,9 @@ fn install(node: &Arc<Node>, peer: &str, zipf: &Path, name: &str, ctx: &mut Valu
     let exe = clean_exe(meta["exe"].as_str().unwrap_or("")).unwrap_or_default();
     remember_exe(node, peer, &name, &exe);
     let note: String = meta["note"].as_str().unwrap_or("").chars().take(2000).collect();
+    // (3.23) сведения о программе: из META (отправитель 3.23+, null — файла не было), у старого отправителя —
+    // version.json в распакованной папке
+    let app = if meta.get("app").is_some() { clean_app(&meta["app"]) } else { app_info(&target) };
     if !gid.is_empty() {
         // реестр: автор и соавторы, получатели и игнор меняются только по слову автора
         let manifest: BTreeMap<String, String> = serde_json::from_value(meta["manifest"].clone()).unwrap_or_default();
@@ -1388,11 +1468,11 @@ fn install(node: &Arc<Node>, peer: &str, zipf: &Path, name: &str, ctx: &mut Valu
         let digest = meta["digest"].as_str().filter(|d| is_digest(d)).map(|d| d.to_lowercase()).unwrap_or_else(|| digest_of(&manifest));
         set_registry(node, &gid, json!({
             "peer": peer, "name": name, "owner": owner, "authors": pick("authors"), "peers": pick("peers"), "ignore": pick("ignore"),
-            "n": got, "digest": digest, "at": time::format(&time::now()), "by": sender,
+            "n": got, "digest": digest, "at": time::format(&time::now()), "by": sender, "app": app,
         }));
         if !manifest.is_empty() {
             save_map(node, &manifest);
         }
     }
-    Ok(json!({ "dir": "in", "peer": peer, "name": name, "mode": mode, "at": time::format(&time::now()), "files": files, "bytes": bytes, "target": target.display().to_string(), "old": old, "sentAt": meta["at"], "exe": exe, "note": note, "n": meta["n"].as_u64(), "gid": gid, "by": sender }))
+    Ok(json!({ "dir": "in", "peer": peer, "name": name, "mode": mode, "at": time::format(&time::now()), "files": files, "bytes": bytes, "target": target.display().to_string(), "old": old, "sentAt": meta["at"], "exe": exe, "note": note, "n": meta["n"].as_u64(), "gid": gid, "by": sender, "app": app }))
 }

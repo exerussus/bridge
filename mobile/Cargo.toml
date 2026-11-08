@@ -1,0 +1,29 @@
+[package]
+name = "most-mobile"
+version.workspace = true
+edition.workspace = true
+description = "Ядро приложения «Мост» для телефона: узел моста внутри приложения (Android, позже iOS)"
+
+[lib]
+name = "most_mobile"
+crate-type = ["cdylib", "staticlib", "lib"]
+
+# Kotlin/Swift-привязки: cargo run -p most-mobile --features cli --bin uniffi-bindgen -- generate --library <.so> --language kotlin --out-dir <папка>
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[features]
+cli = ["uniffi/cli"]
+
+[dependencies]
+bridge-core = { path = "../core" }
+bridge-node = { path = "../node" }
+tokio.workspace = true
+parking_lot.workspace = true
+serde_json.workspace = true
+uniffi = "0.28"
+
+[dev-dependencies]
+reqwest.workspace = true

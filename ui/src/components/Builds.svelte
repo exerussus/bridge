@@ -6,6 +6,8 @@
   import { api } from '../lib/api';
   import { ago, size, fullTime } from '../lib/util';
   import Stepper from './Stepper.svelte';
+  import AppVer from './AppVer.svelte';
+  import { builtLocal, copyHash } from '../lib/appver';
   import { saving, saved as wasSaved, touched, markDeleted, eqIc } from '../lib/buildsync';
 
   type Preset = { id: string; name: string; path: string; peers: string[]; mode: 'patch' | 'clean'; ignore: string[]; exe: string; gid?: string; owner?: string; authors?: string[] };
@@ -133,7 +135,8 @@
     // по версиям: номер → кому ушла, сколько файлов, заметка
     const by = new Map<number, any>();
     for (const h of B.history.filter((h: any) => h.dir === 'out' && mine(h) && !h.error && h.n)) {
-      const v = by.get(h.n) || { n: h.n, at: h.at, note: h.note, files: 0, to: [] as string[], already: [] as string[] };
+      const v = by.get(h.n) || { n: h.n, at: h.at, note: h.note, files: 0, to: [] as string[], already: [] as string[], app: null as any };
+      if (!v.app && h.app) v.app = h.app;
       if (h.already) v.already.push(h.peer); else { v.to.push(h.peer); v.files = Math.max(v.files, h.files); }
       if (h.at < v.at) v.at = h.at;
       if (!v.note && h.note) v.note = h.note;
@@ -160,6 +163,28 @@
       <button class="b sm danger" onclick={del}>Удалить</button>
     </div>
 
+    {#if S?.app}
+      {@const A = S.app}
+      <!-- (3.23) version.json в папке сборки (AppCore): то, что уйдёт со следующей отправкой -->
+      <div class="bapp">
+        <div class="row" style="gap:12px;flex-wrap:wrap">
+          <span class="bapl">Сборка Unity</span>
+          <span class="bapv">v{A.version}</span>
+          {#if A.fullVersion && A.fullVersion !== A.version}<span class="mono small">{A.fullVersion}</span>{/if}
+          <div class="grow"></div>
+          <span class="small muted">из version.json в папке сборки</span>
+        </div>
+        <div class="row bapc">
+          {#if A.hash}<button class="b sm mono" title="Копировать хэш коммита" onclick={() => copyHash(A)}>коммит {A.hash.slice(0, 10)}</button>{/if}
+          {#if A.dirty}<span class="pill warnf">+правки — не закоммичено</span>{/if}
+          {#if A.profile}<span class="pill plain">{A.profile}</span>{/if}
+          {#if A.platform}<span class="pill plain muted">{A.platform}</span>{/if}
+          {#if A.development != null}<span class="pill plain">{A.development ? 'Development' : 'Release'}</span>{/if}
+          {#if A.builtAtUtc}<span class="pill plain" title={A.builtAtUtc}>собрана {builtLocal(A)} · {ago(A.builtAtUtc)}</span>{/if}
+        </div>
+      </div>
+    {/if}
+
     {#if (S?.delivery || []).length}
       <div class="fold2 bdel">
         <div class="row bdh"><h3 style="margin:0;width:150px">Доставка{ln ? ' №' + ln : ''}</h3><span class="muted small grow">{sum}</span>
@@ -167,7 +192,7 @@
         {#each S.delivery as d (d.peer)}
           <div class="bdr">
             <div class="bdp">
-              <div class="row" style="gap:8px"><b class="ell">{titleOf(d.peer)}</b><span class="pill plain {d.has && d.has === ln ? 'okf' : ''}">{d.has ? '№' + d.has : '—'}</span></div>
+              <div class="row" style="gap:8px"><b class="ell">{titleOf(d.peer)}</b><span class="pill plain {d.has && d.has === ln ? 'okf' : ''}">{d.has ? '№' + d.has : '—'}</span><span class="small"><AppVer a={d.app} mode="mini" /></span></div>
               <div class="small muted ell">{!d.has ? (d.sent ? 'получает №' + d.sent : 'ещё нет') : d.has === ln ? 'актуальная' : d.sent && d.sent > d.has ? 'догонит до №' + d.sent : 'отстаёт — «Отправить»'}</div>
             </div>
             <div class="bds">{#if d.state !== 'none'}<Stepper steps={STEPS} at={AT[d.state] ?? 0} pct={d.state === 'transfer' || d.state === 'packing' ? d.pct : null} bad={d.state === 'error'} />{/if}</div>
@@ -182,7 +207,7 @@
     {/if}
 
     <details class="fold2" open={!P.path}>
-      <summary><h3 class="fh">Папка и запуск</h3><span class="mono muted small grow ell">{P.path || 'папка не указана'}{P.exe ? ' · ' + P.exe : ''}</span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true">{@html chev}</svg></summary>
+      <summary><h3 class="fh">Папка и запуск</h3><span class="mono muted small grow ell">{P.path || 'папка не указана'}{P.exe ? ' · ' + P.exe : ''}{S?.app ? ' · version.json v' + S.app.version : ''}</span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true">{@html chev}</svg></summary>
       <div class="bgrid">
         <label class="f">Название<input value={P.name} placeholder={guess(P.path) || 'Моя игра'} oninput={e => edit(p => { p.name = (e.target as HTMLInputElement).value; })} /></label>
         <label class="f">Папка сборки на этом ПК<input class="mono" value={P.path} placeholder="D:\Проекты\Игра\Build" oninput={e => edit(p => { p.path = (e.target as HTMLInputElement).value; if (!p.name || p.name === 'Новая сборка') p.name = guess(p.path) || p.name; }, true)} /></label>
@@ -231,7 +256,7 @@
       <summary><h3 class="fh">История</h3><span class="muted small grow ell">{hist.length ? hist.length + ' верс. · последняя ' + ago(hist[0].at) : 'ещё не отправляли'}</span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true">{@html chev}</svg></summary>
       {#each hist as h (h.n)}
         <div class="brow"><div class="row small" style="gap:10px">
-          <span class="pill plain">№{h.n}</span><span class="grow ell">{h.note || 'без заметки'}</span>
+          <span class="pill plain">№{h.n}</span><span class="bhv">{#if h.app}<AppVer a={h.app} mode="mini" />{:else}<span class="muted">—</span>{/if}</span><span class="grow ell">{h.note || 'без заметки'}</span>
           <span class="muted ell">{h.to.length ? h.files + ' файл. · отдана ' + h.to.map(titleOf).join(', ') : ''}{h.already.length ? (h.to.length ? ' · ' : '') + 'уже была у ' + h.already.map(titleOf).join(', ') : ''}</span>
           <span class="muted" title={fullTime(h.at)} style="width:96px;text-align:right">{ago(h.at)}</span></div></div>
       {/each}
@@ -257,7 +282,7 @@
   .bdel { padding: 4px 16px 8px; }
   .bdh { min-height: 46px; gap: 10px; }
   .bdr { display: flex; gap: 16px; align-items: center; padding: 12px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
-  .bdp { flex: 0 0 170px; min-width: 0; }
+  .bdp { flex: 0 0 230px; min-width: 0; }
   .bds { flex: 1 1 360px; min-width: 280px; }
   .bdd { flex: 0 1 230px; min-width: 150px; color: var(--muted); }
   .bdd.bad { color: #ff7a8a; } .bdd.okc { color: var(--ok); }
@@ -277,4 +302,10 @@
   .bhint { display: flex; gap: 10px; align-items: center; padding: 10px 14px; border-radius: 12px; background: var(--accent-soft); border: 1px solid rgba(56, 225, 240, 0.18); }
   .svd { min-width: 80px; text-align: right; }
   code { font-size: 12px; }
+  .bapp { display: flex; flex-direction: column; gap: 10px; padding: 12px 16px; border-radius: 14px; border: 1px solid rgba(56, 225, 240, 0.22); background: var(--accent-soft); }
+  .bapl { width: 138px; font: 700 10.5px/1.4 var(--display); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+  .bapv { font: 600 20px/1.2 var(--display); color: var(--cyan); }
+  .bapc { gap: 8px; flex-wrap: wrap; padding-left: 150px; }
+  @media (max-width: 900px) { .bapc { padding-left: 0; } }
+  .bhv { width: 190px; flex: none; overflow: hidden; }
 </style>

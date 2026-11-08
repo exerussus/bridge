@@ -5,6 +5,8 @@
   import { ago, size, fullTime } from '../lib/util';
   import Gi from './Gi.svelte';
   import { runKey } from '../lib/buildsync';
+  import AppVer from './AppVer.svelte';
+  import { builtLocal, copyHash } from '../lib/appver';
   let { B, reload, onpreset }: { B: any; reload: () => any; onpreset?: (id: string) => void } = $props();
   // (3.22) общая сборка: подхватить — своя заготовка с тем же GUID, папка — где проект собирается у вас
   let adoptOf = $state(''), adoptPath = $state(''), adoptBusy = $state(false);
@@ -60,7 +62,7 @@
     <div class="row rbh">
       <span class="rbic"><Gi n="box" /></span>
       <div class="grow" style="min-width:0">
-        <div class="row" style="gap:8px"><b class="rbn">{r.name}</b>{#if L.n}<span class="chip">версия №{L.n}</span>{/if}<span class="small muted">от {peerTitle(r.peer)}</span></div>
+        <div class="row" style="gap:8px"><b class="rbn">{r.name}</b>{#if L.n}<span class="chip">версия №{L.n}</span>{/if}{#if L.app}<span class="small"><AppVer a={L.app} mode="mini" /></span>{/if}<span class="small muted">от {peerTitle(r.peer)}</span></div>
         <div class="small muted" title={fullTime(L.at)}>обновлена {ago(L.at)} · {L.mode === 'clean' ? 'целиком' : 'патч'} · {L.files} {L.files === 1 ? 'файл' : 'файлов'} · {size(L.bytes || 0)}{r.error ? ' · последняя не распаковалась' : ''}</div>
       </div>
       <div class="row rbact">
@@ -90,6 +92,21 @@
       </div>
     {/if}
     {#if L.note}<div class="rbnote"><span class="plbl" style="margin:0">Что нового</span><div>{L.note}</div></div>{/if}
+    {#if L.app}
+      {@const A = L.app}
+      <!-- (3.23) version.json из сборки (AppCore) -->
+      <div class="rbapp">
+        <div class="rbal">О сборке · из version.json</div>
+        <div class="rbag">
+          <div><span>Версия</span><b class="mono">{A.fullVersion || A.version}</b></div>
+          <div><span>Коммит</span>{#if A.hash}<b class="row" style="gap:8px"><span class="mono">{A.hash.slice(0, 10)}</span>{#if A.dirty}<span class="rbdirty">+правки</span>{:else if A.dirty === false}<span class="rbclean">без правок</span>{/if}<button class="b sm" title="Копировать хэш коммита" onclick={() => copyHash(A)}>Копировать</button></b>{:else}<b class="muted">—</b>{/if}</div>
+          <div><span>Собрана</span><b title={A.builtAtUtc || ''}>{A.builtAtUtc ? builtLocal(A) + ' · ' + ago(A.builtAtUtc) : '—'}</b></div>
+          <div><span>Профиль</span><b>{A.profile || '—'}</b></div>
+          <div><span>Платформа</span><b>{A.platform || '—'}</b></div>
+          <div><span>Тип</span><b>{A.development == null ? '—' : A.development ? 'Development build' : 'Release'}</b></div>
+        </div>
+      </div>
+    {/if}
     {#if r.error}<div class="small" style="color:var(--warn);margin-top:6px">Последняя присланная не распаковалась: {r.error}</div>{/if}
     <div class="small muted mono rbt">{r.target}{r.exe ? ' · запуск: ' + r.exe + (r.exeOwn ? ' (своё)' : '') : ''}</div>
     {#if r.history.length > 1}
@@ -99,7 +116,7 @@
           {#each r.history as h, i (h.at + i)}
             <div class="brow"><div class="row small" style="gap:8px">
               {#if h.n}<span class="chip">№{h.n}</span>{/if}
-              {#if h.error}<span style="color:var(--warn)">не распаковалась: {h.error}</span>{:else}<span class="chip">{h.mode === 'clean' ? 'целиком' : 'патч'}</span><span class="muted">{h.files} {h.files === 1 ? 'файл' : 'файлов'} · {size(h.bytes || 0)}</span>{/if}
+              {#if h.error}<span style="color:var(--warn)">не распаковалась: {h.error}</span>{:else}<span class="chip">{h.mode === 'clean' ? 'целиком' : 'патч'}</span>{#if h.app}<AppVer a={h.app} mode="mini" />{/if}<span class="muted">{h.files} {h.files === 1 ? 'файл' : 'файлов'} · {size(h.bytes || 0)}</span>{/if}
               <div class="grow"></div><span class="muted" title={fullTime(h.at)}>{ago(h.at)}</span></div>
               {#if h.note}<div class="small rbhn">{h.note}</div>{/if}
             </div>
@@ -126,4 +143,13 @@
   .rbpatch { min-width: 172px; }
   .rbhn { white-space: pre-wrap; color: var(--muted, #A3A7CC); padding: 2px 0 0 4px; }
   .brow { padding: 6px 0; border-top: 1px solid var(--line); }
+  .rbapp { margin-top: 10px; padding: 12px 14px; border-radius: 12px; border: 1px solid rgba(56, 225, 240, 0.22); background: var(--accent-soft); }
+  .rbal { font: 700 10.5px/1.4 var(--display); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+  .rbag { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 24px; font-size: 13px; }
+  @media (max-width: 900px) { .rbag { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .rbag > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .rbag > div > span { font-size: 12px; color: var(--muted); }
+  .rbag b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-height: 24px; align-items: center; }
+  .rbdirty { color: var(--warn); font-size: 12px; font-weight: 700; }
+  .rbclean { color: var(--ok); font-size: 12px; }
 </style>

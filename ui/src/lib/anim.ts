@@ -40,7 +40,8 @@ export function animMsg(m: HTMLElement, a: { id: string; conv: string }) {
 /** Держать низ ленты внизу, пока читатель внизу: картинки догружаются, поле ввода растёт, колонку тянут. */
 export function stick(feed: HTMLElement) {
   let on = true;
-  const keep = () => { if (on) feed.scrollTop = feed.scrollHeight; };
+  // (3.22.1) двигать ленту, только если она внизу и правда не внизу — иначе ползунок дёргался при каждом обновлении
+  const keep = () => { if (!on) return; const t = feed.scrollHeight - feed.clientHeight; if (Math.abs(feed.scrollTop - t) > 1) feed.scrollTop = t; };
   const onScroll = () => { on = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40; };
   feed.addEventListener('scroll', onScroll, { passive: true });
   const ro = new ResizeObserver(keep); ro.observe(feed);

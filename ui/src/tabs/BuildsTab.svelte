@@ -1,6 +1,7 @@
 <script lang="ts">
   // «Сборки» (3.21): свои и присланные — одной сеткой карточек. На каждой — «▶ Запустить» (и у своих: из её папки),
   // у своих — «Отправить» или «⟳ Сейчас», если версия ждёт, пока сосед заберёт. Ниже — выбранная сборка подробно.
+  import AppVer from '../components/AppVer.svelte';
   import { SET, setSet, toast, titleOf } from '../lib/state.svelte';
   import { api } from '../lib/api';
   import { ago, size } from '../lib/util';
@@ -65,7 +66,7 @@
     pick('p:' + p.id); if (tab === 'in') setTab('all');
   }
 
-  type Card = { key: string; mine: boolean; name: string; who: string; ver: string; note: string; meta: string; running: boolean; canRun: boolean; runTitle: string; waiting: string[]; p?: any; r?: any };
+  type Card = { key: string; mine: boolean; name: string; who: string; ver: string; note: string; meta: string; running: boolean; canRun: boolean; runTitle: string; waiting: string[]; app: any; p?: any; r?: any };
   const cards = $derived.by(() => {
     if (!B) return [] as Card[];
     const C: Card[] = [];
@@ -82,14 +83,16 @@
       const team = p.mine ? (p.authors?.length ? 'моя, с соавторами' : 'моя') : 'соавтор · автор ' + titleOf(p.owner);
       C.push({ key: 'p:' + p.id, mine: true, name: p.name || 'Без названия', who: team + (p.peers?.length ? ' → ' + p.peers.map(titleOf).join(', ') : ' · получатели не выбраны'), ver: n ? '№' + n : '—',
         note: kn > own ? '№' + kn + ' выпустил соавтор' + (own ? ' · ваша последняя — №' + own : '') : p.latest?.note || (p.path ? '' : 'Укажите папку сборки'), meta: job ? 'упаковка ' + (job.pct ?? 0) + '%' : (n ? '№' + n + ': ' : '') + (parts.join(' · ') || (p.path ? 'ещё не отправляли' : '')),
-        running: !!p.running, canRun: !!p.exe, runTitle: p.exe ? p.exe + ' из ' + p.path : 'укажите, что запускать', waiting: D.filter((d: any) => d.state === 'waiting' && d.online).map((d: any) => d.peer), p });
+        running: !!p.running, canRun: !!p.exe, runTitle: p.exe ? p.exe + ' из ' + p.path : 'укажите, что запускать', waiting: D.filter((d: any) => d.state === 'waiting' && d.online).map((d: any) => d.peer),
+        // (3.23) версия программы: у последней отправленной; не отправляли — что лежит в папке
+        app: p.latest ? p.latest.app || null : p.app || null, p });
     }
     if (tab !== 'mine') for (const r of B.received) {
       const L = r.lastOk || r;
       const from = r.gid && r.by && r.by !== r.peer ? titleOf(r.by) + ' (автор ' + titleOf(r.peer) + ')' : titleOf(r.peer);
       C.push({ key: 'r:' + r.peer + '/' + r.name, mine: false, name: r.name, who: 'от ' + from + ' · ' + ago(L.at), ver: L.n ? '№' + L.n : '—', note: L.note || '',
         meta: r.error ? 'последняя не распаковалась' : (L.mode === 'clean' ? 'целиком' : 'патч') + ' · ' + L.files + ' файл. · ' + size(L.bytes || 0) + (r.exe ? ' · ' + r.exe : ''),
-        running: !!r.running, canRun: !!r.exe && !!r.exeExists, runTitle: r.exeExists ? r.exe : r.exe ? 'нет файла ' + r.exe + ' в папке сборки' : 'не указано, что запускать', waiting: [], r });
+        running: !!r.running, canRun: !!r.exe && !!r.exeExists, runTitle: r.exeExists ? r.exe : r.exe ? 'нет файла ' + r.exe + ' в папке сборки' : 'не указано, что запускать', waiting: [], app: L.app || null, r });
     }
     return C;
   });
@@ -146,6 +149,7 @@
           <span class="grow" style="min-width:0"><span class="bcn ell">{c.name}</span><span class="small muted ell" style="display:block">{c.who}</span></span>
           <span class="pill plain">{c.ver}</span>
         </button>
+        <AppVer a={c.app} />
         <div class="bcnote">{c.note}</div>
         <div class="small muted ell" title={c.meta}>{c.meta}</div>
         <div class="row bcact">

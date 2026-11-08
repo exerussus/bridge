@@ -89,6 +89,11 @@ pub struct BuildReport {
     pub gid: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub digest: String,
+    /// (3.23) версия программы, что стоит у получателя, — из version.json сборки (AppCore): «0.11.0»; нет файла — пусто.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub app: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub app_dirty: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
