@@ -6,6 +6,7 @@
   import { tileOf, tileImgUrl, stImgUrl, tileVars, tileCls } from '../lib/tile.svelte';
   import { statusHover } from '../lib/statuspop';
   import { openStatusMenu } from '../lib/statusmenu';
+  import { openPeerMenu } from '../lib/peermenu';
   // Каналы: слева список каналов, в центре канал (вкладки «Участники», «Показы», «Доска») и панель управления внизу,
   // справа чат. Кнопки панели не исчезают и не двигаются: недоступное — серое.
   import { ui, SET, setSet, titleOf, me, openModal } from '../lib/state.svelte';
@@ -236,7 +237,7 @@
               {@const ind = IND(t.st)}
               {@const tl = tileOf(t.name)}
               {@const sts = t.st && 'sts' in t.st ? t.st.sts : tileStatus(tl)}
-              <div class="tile {cls} {tileCls(tl?.style)}" style={tileVars(tl?.style)} class:speaking={SPK[t.mine ? '__me' : t.name]} class:sharing={streams.length > 0} class:greeting={GREET[t.name]} use:flash={PINGED[t.name] || 0} use:dropSend={t.mine ? null : t.name} role="group" aria-label={t.mine ? "Вы" : titleOf(t.name)} oncontextmenu={t.mine ? openStatusMenu : undefined} use:statusHover={sts ? { name: t.name, text: sts.text, color: sts.color, img: sts.img ? stImgUrl(t.name, sts.img) : '' } : null}>
+              <div class="tile {cls} {tileCls(tl?.style)}" style={tileVars(tl?.style)} class:speaking={SPK[t.mine ? '__me' : t.name]} class:sharing={streams.length > 0} class:greeting={GREET[t.name]} use:flash={PINGED[t.name] || 0} use:dropSend={t.mine ? null : t.name} role="group" aria-label={t.mine ? "Вы" : titleOf(t.name)} oncontextmenu={t.mine ? openStatusMenu : (e: MouseEvent) => openPeerMenu(e, t.name)} use:statusHover={sts ? { name: t.name, text: sts.text, color: sts.color, img: sts.img ? stImgUrl(t.name, sts.img) : '' } : null}>
                 <TileArt st={tl?.style} url={tl ? tileImgUrl(t.name, tl.img) : ''} />
                 {#if streams.length}<button class="tshare" title={(t.mine ? 'Ваш показ: ' : 'Смотреть показ: ') + streams.map((x: any) => x.label).join(', ')} onclick={() => openShows(t.name, t.mine)}><Gi n="screen" />{#if streams.length > 1}<b>{streams.length}</b>{/if}</button>{/if}
                 {#if stLbl[cls]}<span class="stl">{stLbl[cls]}</span>{/if}

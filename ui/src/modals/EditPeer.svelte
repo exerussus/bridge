@@ -18,6 +18,19 @@
   const netIp = (p.ips || []).find((i: string) => /^10\.77\./.test(i)) || '';
   let alt = $state(p.alt || '');
   let secret = $state('');
+  // (3.21.1) запасной ↔ основной: часто подключаться надо как раз по запасному (Radmin, своя сеть)
+  function swapAlt() {
+    const a = alt.trim().replace(/^http:\/\//, '');
+    if (!a) return;
+    const m = a.match(/^(.+?)(?::(\d+))?$/)!;
+    const was = ip.trim() ? ip.trim() + (port ? ':' + port : '') : '';
+    // (3.22.1) прежний основной адрес — и в «ещё адреса»: с него сосед по-прежнему может стучаться
+    const old = ip.trim(), ex = extra.split(',').map((x: string) => x.trim()).filter(Boolean);
+    if (old && old !== m[1] && !ex.includes(old)) extra = [...ex, old].join(', ');
+    ip = m[1]; if (m[2]) port = m[2];
+    alt = was;
+    toast('Запасной стал основным — «Сохранить»');
+  }
   let shares = $state<string[]>([...p.shares]);
   let enabled = $state(p.enabled);
   let made = $state('');
@@ -37,7 +50,8 @@
 <label class="f">Имя узла — сосед сообщает его сам<input disabled value={p.name + (p.pending ? ' (временное — до первого ответа)' : '')} /></label>
 <label class="f">Псевдоним — для вас (можно менять)<input bind:value={title} placeholder="Рабочий ноутбук" /></label>
 <div class="row"><label class="f" style="flex:1">Основной адрес (IP) — Radmin, домашняя сеть<input bind:value={ip} placeholder="192.168.1.172 или 26.x.x.x" /></label><label class="f" style="width:110px">Порт<input bind:value={port} /></label></div>
-<label class="f">Запасной адрес — если основной не отвечает. Адрес соседа в своей сети (10.77.x.y) мост вписывает сам, когда сосед его сообщит{#if netIp && !alt} — сейчас это <b class="mono">{netIp}</b>{/if}<input bind:value={alt} placeholder={netIp || '10.77.0.x'} /></label>
+<div class="row" style="align-items:flex-end"><label class="f" style="flex:1">Запасной адрес — если основной не отвечает. Адрес соседа в своей сети (10.77.x.y) мост вписывает сам, когда сосед его сообщит{#if netIp && !alt} — сейчас это <b class="mono">{netIp}</b>{/if}<input bind:value={alt} placeholder={netIp || '10.77.0.x'} /></label>
+  <button class="b sm" style="margin-bottom:10px" disabled={!alt.trim()} title="Поменять местами: запасной станет основным, основной — запасным" onclick={swapAlt}>⇅ Сделать основным</button></div>
 <label class="f">Ещё адреса, с которых его пускать (через запятую). С 1.4 сосед сообщает свои адреса сам — вписывать нужно только для старых версий<input bind:value={extra} /></label>
 <label class="f">Ключ пары (пусто — не менять; новый — такой же и на том ПК)<input bind:value={secret} placeholder="BRS-…" autocomplete="off" /></label>
 <div class="f">Пространства<div class="row">{#each ui.ov.shares as s (s.id)}<label><input type="checkbox" value={s.id} bind:group={shares} /> {s.id}</label>{/each}</div>

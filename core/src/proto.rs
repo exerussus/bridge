@@ -73,6 +73,24 @@ impl Default for NodeStatus {
     }
 }
 
+/// (3.21) Отчёт получателя отправителю: последняя присланная им версия сборки и распаковалась ли она.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BuildReport {
+    pub name: String,
+    pub n: u64,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub error: String,
+    pub at: String,
+    /// (3.22) общая сборка: её GUID и отпечаток набора файлов, который сейчас лежит у получателя
+    /// (по нему соавтор считает патч от того, что у получателя на самом деле).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub gid: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub digest: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct HelloResponse {
@@ -119,6 +137,12 @@ pub struct HelloResponse {
     /// (3.19) Этот узел хочет гонять файлы со спрашивающим через свой сервер (своя сеть 10.77).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bulk: bool,
+    /// (3.20) Как достучаться до этого узла через его сервер: сервер и имя участника.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<crate::tunnel::LinkInfo>,
+    /// (3.21) Сборки от спросившего: что распаковалось и с какой ошибкой (видно в его «Доставке»).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub builds: Vec<BuildReport>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -186,6 +210,8 @@ impl Default for HelloResponse {
             ping: String::new(),
             tile: String::new(),
             bulk: false,
+            link: None,
+            builds: Vec::new(),
         }
     }
 }

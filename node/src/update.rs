@@ -36,7 +36,7 @@ pub fn local_name(name: &str) -> Option<&'static str> {
     if name == LEGACY_EXE {
         return Some(if cfg!(windows) { APP_EXE } else { "bridge-app" });
     }
-    names().iter().find(|n| **n == name).copied()
+    names().iter().chain(extras().iter()).find(|n| **n == name).copied()
 }
 
 /// Путь к своему файлу программы: Most.exe, а если мост ещё не переименовался — Мост.exe.
@@ -80,6 +80,36 @@ pub fn cmp(a: &str, b: &str) -> Ordering {
     Ordering::Equal
 }
 
+/// (3.21.1) Служба своей сети и её драйвер: уходят вместе с мостом, если есть рядом с программой.
+/// Мостам до 3.21.1 — нет: они отвергли бы предложение с незнакомыми файлами.
+pub const EXTRAS_SINCE: &str = "3.21.1";
+pub fn extras() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["most-net.exe", "wintun.dll"]
+    } else {
+        &["most-net"]
+    }
+}
+/// Служба своей сети (её обновление после установки — с подтверждением администратора).
+pub fn net_exe() -> &'static str {
+    extras()[0]
+}
+
+/// (3.22.1) Версия службы своей сети, что лежит в `dir` (`most-net version` → «most-net 3.22.1»); None — нет или не запускается.
+pub async fn net_version(dir: &std::path::Path) -> Option<String> {
+    let exe = dir.join(net_exe());
+    if !exe.is_file() {
+        return None;
+    }
+    let mut c = tokio::process::Command::new(&exe);
+    c.arg("version").kill_on_drop(true);
+    #[cfg(windows)]
+    c.creation_flags(0x0800_0000);
+    let o = tokio::time::timeout(std::time::Duration::from_secs(5), c.output()).await.ok()?.ok()?;
+    let t = String::from_utf8_lossy(&o.stdout).to_string();
+    t.trim().strip_prefix("most-net ").map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
 pub fn names() -> &'static [&'static str] {
     if cfg!(windows) {
         &[APP_EXE, "bridge.exe"]
@@ -112,6 +142,7 @@ pub fn own_files(node: &Node) -> Vec<(String, PathBuf, u64, String)> {
     let dir = node.updates.dir();
     names()
         .iter()
+        .chain(extras().iter())
         .filter_map(|n| {
             let p = local_path(&dir, n)?;
             let b = std::fs::read(&p).ok()?;
@@ -142,7 +173,7 @@ pub fn notes_since(since: &str) -> String {
 /// После перезапуска: убрать *.old от прошлого обновления.
 pub fn cleanup(node: &Node) {
     let dir = node.updates.dir();
-    for n in names().iter().chain([LEGACY_EXE].iter()) {
+    for n in names().iter().chain(extras().iter()).chain([LEGACY_EXE].iter()) {
         let _ = std::fs::remove_file(dir.join(format!("{}.old", n)));
     }
     let marker = node.data_dir.join("update-done.json");
@@ -163,6 +194,9 @@ pub async fn offer(node: &Arc<Node>, only: &[String]) -> Value {
     if files.is_empty() {
         return json!({ "error": "не найдены файлы программы рядом с мостом", "results": results });
     }
+    // (3.22.1) служба своей сети уходит только той же версии, что и мост: рядом с программой мог остаться старый most-net
+    // (до 3.21.1 его по сети не возили) — им у соседа откатили бы новую службу
+    let net_ok = net_version(&node.updates.dir()).await.as_deref() == Some(mine);
     let peers: Vec<_> = node.cfg.read().peers.iter().filter(|p| p.enabled && p.has_url() && (only.is_empty() || only.iter().any(|o| bridge_core::eq_ic(o, &p.name)))).cloned().collect();
     for p in peers {
         let st = node.peer_state(&p.name);
@@ -174,7 +208,7 @@ pub async fn offer(node: &Arc<Node>, only: &[String]) -> Value {
             format!("уже {}", st.version)
         } else if cmp(&st.version, MIN_AUTO) == Ordering::Less {
             // старый мост сам обновиться не умеет — файлы обычной отправкой
-            let old: Vec<_> = files.iter().map(|(n, p, s, h)| (wire_name(n, &st.version).to_string(), p.clone(), *s, h.clone())).collect();
+            let old: Vec<_> = files.iter().filter(|(n, ..)| !extras().contains(&n.as_str())).map(|(n, p, s, h)| (wire_name(n, &st.version).to_string(), p.clone(), *s, h.clone())).collect();
             match send_files(node, &p.name, &old) {
                 Ok(dir) => {
                     if cmp(&st.version, "2.10.0") != Ordering::Less {
@@ -185,11 +219,17 @@ pub async fn offer(node: &Arc<Node>, only: &[String]) -> Value {
                 Err(e) => format!("не удалось отправить файлы: {}", e),
             }
         } else {
-            let body = json!({
+            // служба своей сети — только мостам, которые её примут (3.21.1+)
+            let with_extras = net_ok && cmp(&st.version, EXTRAS_SINCE) != Ordering::Less;
+            let files: Vec<_> = files.iter().filter(|(n, ..)| with_extras || !extras().contains(&n.as_str())).cloned().collect();
+            let mut body = json!({
                 "version": mine,
                 "files": files.iter().map(|(n, _, s, h)| json!({ "name": wire_name(n, &st.version), "size": s, "sha256": h })).collect::<Vec<_>>(),
                 "notes": notes_since(&st.version),
             });
+            if with_extras {
+                body["netVersion"] = json!(mine);
+            }
             let c = node.client_for(&p);
             match tokio::time::timeout(std::time::Duration::from_secs(10), c.post_json("/peer/update/offer", &body)).await {
                 Ok(Ok((code, _))) if (200..300).contains(&code) => "предложено — ждём подтверждения".to_string(),
@@ -223,15 +263,24 @@ pub fn on_offer(node: &Node, from: &str, v: &Value) -> Result<(), (u16, String)>
         return Err((409, format!("здесь уже {}", bridge_core::APP_VERSION)));
     }
     let files = v["files"].as_array().cloned().unwrap_or_default();
-    if files.is_empty() || files.iter().any(|f| local_name(f["name"].as_str().unwrap_or("")).is_none() || f["sha256"].as_str().map(|h| h.len() != 64).unwrap_or(true)) {
+    if files.is_empty() || files.iter().any(|f| local_name(f["name"].as_str().unwrap_or("")).is_none() || f["sha256"].as_str().map(|h| h.len() != 64 || !h.bytes().all(|c| c.is_ascii_hexdigit())).unwrap_or(true)) {
         return Err((400, "неверный список файлов".into()));
+    }
+    // (3.22.1) один файл — один раз (Мост.exe и Most.exe — одно и то же), и хотя бы один файл самого моста
+    let locals: Vec<&str> = files.iter().filter_map(|f| local_name(f["name"].as_str().unwrap_or(""))).collect();
+    if (1..locals.len()).any(|i| locals[..i].contains(&locals[i])) {
+        return Err((400, "файл указан дважды".into()));
+    }
+    if !locals.iter().any(|l| names().contains(l)) {
+        return Err((400, "в предложении нет файлов моста".into()));
     }
     let st = node.updates.status.lock().0.clone();
     if ["download", "install", "restart"].contains(&st.as_str()) {
         return Err((409, "обновление уже идёт".into()));
     }
     let notes: String = v["notes"].as_str().unwrap_or("").chars().take(8000).collect();
-    *node.updates.offer.lock() = Some(json!({ "from": from, "version": ver, "files": files, "notes": notes, "time": bridge_core::time::format(&bridge_core::time::now()) }));
+    let net_ver = v["netVersion"].as_str().filter(|x| x.len() <= 32).unwrap_or(ver).to_string();
+    *node.updates.offer.lock() = Some(json!({ "from": from, "version": ver, "netVersion": net_ver, "files": files, "notes": notes, "time": bridge_core::time::format(&bridge_core::time::now()) }));
     node.updates.set(node, "offer", "");
     node.info(&format!("«{}» предлагает обновить мост до {}", from, ver));
     node.emit("update-offer", json!({ "from": from, "version": ver }));
@@ -262,6 +311,10 @@ pub async fn accept(node: &Arc<Node>) -> Result<(), String> {
     for f in &files {
         let name = f["name"].as_str().unwrap_or("");
         let size = f["size"].as_i64().unwrap_or(0);
+        // (3.21.1) такой же файл уже есть (например, wintun.dll) — не качать и не трогать
+        if same_local(node, name, f["sha256"].as_str().unwrap_or("")) {
+            continue;
+        }
         let g = node.transfers.start("down", &from, "обновление", name, size);
         let r = tokio::time::timeout(std::time::Duration::from_secs(600), client.get_bytes(&format!("/peer/update/file?name={}", crate::client::esc(name)))).await;
         drop(g);
@@ -279,8 +332,13 @@ pub async fn accept(node: &Arc<Node>) -> Result<(), String> {
     node.updates.set(node, "install", "");
     let dir = node.updates.dir();
     let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut net_new = false;
     for f in &files {
         let wire = f["name"].as_str().unwrap_or("");
+        if !tmp.join(wire).exists() {
+            continue; // тот же, что здесь
+        }
+        net_new |= extras().contains(&wire); // служба или её драйвер (у установленной службы — свои копии)
         let name = local_name(wire).unwrap_or(wire);
         let target = dir.join(name);
         let old = dir.join(format!("{}.old", name));
@@ -306,6 +364,10 @@ pub async fn accept(node: &Arc<Node>) -> Result<(), String> {
         done.push((target, old));
     }
     let _ = std::fs::write(node.data_dir.join("update-done.json"), json!({ "from": from, "version": offer["version"] }).to_string());
+    if net_new {
+        // после перезапуска: служба своей сети установлена и старая — обновить её (Windows спросит подтверждение)
+        let _ = std::fs::write(node.data_dir.join(NET_REFRESH), offer["netVersion"].as_str().or(offer["version"].as_str()).unwrap_or(""));
+    }
     *node.updates.offer.lock() = None;
     node.info(&format!("Мост {} установлен (от {}) — перезапускаюсь", offer["version"].as_str().unwrap_or(""), from));
     let hook = node.updates.restart_hook.lock().clone();
@@ -319,6 +381,15 @@ pub async fn accept(node: &Arc<Node>) -> Result<(), String> {
         None => node.updates.set(node, "done", "установлено — перезапустите мост"),
     }
     Ok(())
+}
+
+/// Метка «пришла новая служба своей сети — обновить установленную».
+pub const NET_REFRESH: &str = "mostnet-refresh";
+
+/// Файл `name` здесь уже такой же (по sha256).
+fn same_local(node: &Node, name: &str, sha: &str) -> bool {
+    let Some(p) = local_path(&node.updates.dir(), name) else { return false };
+    std::fs::read(&p).map(|b| hex::encode(Sha256::digest(&b)) == sha).unwrap_or(false)
 }
 
 // ───────────── возврат в канал после обновления (3.10) ─────────────

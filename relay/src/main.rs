@@ -14,6 +14,7 @@
 
 mod admin;
 mod client;
+mod link;
 mod net;
 mod proto;
 mod pty;
@@ -193,6 +194,8 @@ pub(crate) struct Srv {
     admin_epoch: Mutex<CancellationToken>,
     /// Своя сеть MostNet: токены сеансов и куда слать каждому адресу.
     net: net::NetState,
+    /// Связь мостов через сервер (3.20).
+    link: link::LinkState,
 }
 
 impl Srv {
@@ -248,6 +251,7 @@ async fn hello(Extension(srv): Extension<Arc<Srv>>, Extension(from): Extension<S
         you: from.ip().to_string(),
         files: Some(c.net_files),
         net_mbit: c.net_mbit,
+        links: Some(true),
     }))
 }
 
@@ -318,6 +322,9 @@ fn router(srv: Arc<Srv>) -> Router {
         .route(bridge_core::mostnet::JOIN_PATH, post(net::join))
         .route(bridge_core::mostnet::PEERS_PATH, get(net::peers))
         .route(bridge_core::mostnet::WS_PATH, get(net::ws))
+        .route(bridge_core::tunnel::LINK_CTL_PATH, get(link::ctl))
+        .route(bridge_core::tunnel::LINK_DIAL_PATH, get(link::dial))
+        .route(bridge_core::tunnel::LINK_ACCEPT_PATH, get(link::accept))
         .layer(Extension(srv))
 }
 
@@ -386,6 +393,7 @@ async fn watch_config(srv: Arc<Srv>) {
                 for g in gone {
                     srv.turn.drop_who(&g);
                     srv.net.drop_member(&g);
+                    srv.link.drop_member(&g);
                     log(&format!("участник «{}» отозван — его разговоры через сервер закрыты", g));
                 }
                 log("relay.json перечитан");
@@ -435,7 +443,7 @@ async fn run(dir: PathBuf) -> Result<(), String> {
     };
     let opts = Opts { relay_ip: Some(ip), relay_ports: Some((rp[0].min(rp[1]), rp[0].max(rp[1]))), max_allocs: 1024, max_per_who: per.max(2), allow: Some(allow) };
     let turn = Turn::new(key, opts, CancellationToken::new());
-    let srv = Arc::new(Srv { dir: dir.clone(), cfg, turn: turn.clone(), nonces: NonceCache::default(), seen: Mutex::new(HashMap::new()), started: now_text(), tries: Mutex::new(HashMap::new()), join_lock: tokio::sync::Mutex::new(()), admin_epoch: Mutex::new(CancellationToken::new()), net: net::NetState::default() });
+    let srv = Arc::new(Srv { dir: dir.clone(), cfg, turn: turn.clone(), nonces: NonceCache::default(), seen: Mutex::new(HashMap::new()), started: now_text(), tries: Mutex::new(HashMap::new()), join_lock: tokio::sync::Mutex::new(()), admin_epoch: Mutex::new(CancellationToken::new()), net: net::NetState::default(), link: link::LinkState::default() });
     let any = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
     if udp_port != 0 {
         let s = UdpSocket::bind(SocketAddr::new(any, udp_port)).await.map_err(|e| format!("UDP {}: {}", udp_port, e))?;

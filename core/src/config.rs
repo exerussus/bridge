@@ -193,11 +193,13 @@ pub struct RelayConfig {
     pub net: bool,
     /// Файлы и синхронизация с соседями — через сервер (3.19): по их адресам в своей сети, если сервер разрешает.
     pub files: bool,
+    /// Связь с соседями через сервер (3.20), когда напрямую, через Radmin и по своей сети не выходит.
+    pub link: bool,
 }
 
 impl Default for RelayConfig {
     fn default() -> Self {
-        RelayConfig { server: String::new(), member: String::new(), secret: String::new(), mode: "auto".into(), share: true, net: false, files: false }
+        RelayConfig { server: String::new(), member: String::new(), secret: String::new(), mode: "auto".into(), share: true, net: false, files: false, link: true }
     }
 }
 
@@ -239,6 +241,12 @@ pub struct PeerConfig {
     /// Когда адрес из `ips` последний раз использовался (дата UTC «ГГГГ-ММ-ДД»): с него пришёл подписанный запрос
     /// соседа или мы до соседа по нему достучались. Не использованные больше `IP_KEEP_DAYS` — убираются (3.18).
     pub ip_seen: std::collections::BTreeMap<String, String>,
+    /// Связь через свой сервер (3.20): сосед — участник этого сервера под этим именем (из его привета или звонка).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub relay_member: String,
+    /// Адрес сервера соседа (`хост:порт`), к которому относится `relay_member`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub relay_host: String,
 }
 
 /// Сколько дней хранить неиспользуемый дополнительный адрес соседа.
@@ -246,7 +254,7 @@ pub const IP_KEEP_DAYS: i64 = 3;
 
 impl Default for PeerConfig {
     fn default() -> Self {
-        PeerConfig { name: String::new(), pending: false, title: String::new(), url: String::new(), ips: Vec::new(), secret: String::new(), enabled: true, alt: String::new(), ip_seen: Default::default() }
+        PeerConfig { name: String::new(), pending: false, title: String::new(), url: String::new(), ips: Vec::new(), secret: String::new(), enabled: true, alt: String::new(), ip_seen: Default::default(), relay_member: String::new(), relay_host: String::new() }
     }
 }
 

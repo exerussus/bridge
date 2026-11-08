@@ -1234,6 +1234,12 @@ async fn update_offer_accept_install_and_restart() {
     assert_eq!(code, 409);
     let (code, _) = c.post_json("/peer/update/offer", &json!({ "version": "99.0.0", "files": [{ "name": "../evil.exe", "size": 1, "sha256": "0".repeat(64) }] })).await.unwrap();
     assert_eq!(code, 400);
+    // (3.22.1) только служба своей сети, без файлов моста — отказ; один и тот же файл дважды — отказ
+    let (code, _) = c.post_json("/peer/update/offer", &json!({ "version": "99.0.0", "files": [{ "name": bridge_node::update::net_exe(), "size": 1, "sha256": "0".repeat(64) }] })).await.unwrap();
+    assert_eq!(code, 400, "предложение без файлов моста");
+    let (code, _) = c.post_json("/peer/update/offer", &json!({ "version": "99.0.0", "files": [files[0].clone(), files[0].clone()] })).await.unwrap();
+    assert_eq!(code, 400, "файл дважды");
+    assert!(beta.updates.state()["offer"].is_null());
     // испорченный отпечаток — ничего не заменено
     let mut bad = files.clone();
     bad[0]["sha256"] = json!("0".repeat(64));
@@ -1245,10 +1251,27 @@ async fn update_offer_accept_install_and_restart() {
     for n in names {
         assert_eq!(std::fs::read_to_string(db.join(n)).unwrap(), format!("старый {}", n), "при ошибке файлы не тронуты");
     }
-    // как надо
-    let (code, _) = c.post_json("/peer/update/offer", &json!({ "version": "99.0.0", "files": files, "notes": "## 99.0.0\n- новое" })).await.unwrap();
+    // как надо; (3.21.1) со службой своей сети: новая — заменяется, одинаковый драйвер — не трогается
+    let net_exe = bridge_node::update::net_exe();
+    std::fs::write(da.join(net_exe), "новая служба").unwrap();
+    std::fs::write(db.join(net_exe), "старая служба").unwrap();
+    let mut files = files.clone();
+    let b = std::fs::read(da.join(net_exe)).unwrap();
+    files.push(json!({ "name": net_exe, "size": b.len(), "sha256": hex::encode(Sha256::digest(&b)) }));
+    if let Some(drv) = bridge_node::update::extras().get(1) {
+        std::fs::write(da.join(drv), "драйвер").unwrap();
+        std::fs::write(db.join(drv), "драйвер").unwrap();
+        files.push(json!({ "name": drv, "size": 14, "sha256": hex::encode(Sha256::digest("драйвер".as_bytes())) }));
+    }
+    let (code, _) = c.post_json("/peer/update/offer", &json!({ "version": "99.0.0", "netVersion": "99.0.0", "files": files, "notes": "## 99.0.0\n- новое" })).await.unwrap();
     assert_eq!(code, 200);
     bridge_node::update::accept(&beta).await.unwrap();
+    assert_eq!(std::fs::read_to_string(db.join(net_exe)).unwrap(), "новая служба");
+    // метка — с версией пришедшей службы: установленную обновят, только если она старше
+    assert_eq!(std::fs::read_to_string(beta.data_dir.join(bridge_node::update::NET_REFRESH)).unwrap(), "99.0.0", "после перезапуска — обновить установленную службу");
+    if let Some(drv) = bridge_node::update::extras().get(1) {
+        assert!(!db.join(format!("{}.old", drv)).exists(), "одинаковый файл не трогается");
+    }
     for n in names {
         assert_eq!(std::fs::read_to_string(db.join(n)).unwrap(), format!("новый {}", n), "заменён {}", n);
         assert_eq!(std::fs::read_to_string(db.join(format!("{}.old", n))).unwrap(), format!("старый {}", n), "старый — рядом, до перезапуска");
@@ -1732,10 +1755,12 @@ async fn builds_patch_and_clean() {
     for _ in 0..100 { if std::fs::read(target.join("Game_Data/Managed/Assembly.dll")).unwrap() == b"v2" { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
     assert_eq!(std::fs::read(target.join("Game_Data/Managed/Assembly.dll")).unwrap(), b"v2");
     assert!(target.join("local-note.txt").exists(), "патч не трогает остальное");
-    // пустой патч — понятная ошибка
+    assert_eq!(st["history"][0]["n"], 2, "файлы изменились — №2: {}", st);
+    // (3.21) ничего не изменилось — не ошибка: у соседа уже №2
     bridge_node::builds::send(&dev, "stand", src.to_str().unwrap(), "Game", "patch").unwrap();
-    for _ in 0..100 { if dev.builds.jobs.lock().is_empty() { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
-    assert!(bridge_node::builds::status(&dev)["history"][0]["error"].as_str().unwrap_or("").contains("ничего не изменилось"));
+    for _ in 0..100 { if dev.builds.jobs.lock().is_empty() && bridge_node::builds::status(&dev)["history"].as_array().map(|a| a.len()).unwrap_or(0) >= 3 { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    let h3 = bridge_node::builds::status(&dev)["history"][0].clone();
+    assert_eq!((h3["already"].clone(), h3["n"].clone(), h3["error"].clone()), (json!(true), json!(2), json!(null)), "{}", h3);
     // чистая: лишнее уходит (в корзину), остаётся ровно присланное
     bridge_node::builds::send(&dev, "stand", src.to_str().unwrap(), "Game", "clean").unwrap();
     wait("4").await;
@@ -1747,6 +1772,15 @@ async fn builds_patch_and_clean() {
     let old = h["history"][0]["old"].as_str().unwrap_or("").to_string();
     assert!(std::path::Path::new(&old).join("local-note.txt").exists(), "прежняя папка — в корзине: {}", h);
     assert!(!stand.mailbox.in_root(&stand).join("dev").join(bridge_node::builds::DIR).join("Game").exists(), "архивы убраны");
+    assert_eq!(bridge_node::builds::status(&dev)["history"][0]["n"], 2, "целиком, но те же файлы — тот же №2");
+    assert_eq!(h["history"][0]["n"], 2, "у получателя тоже №2: {}", h);
+    // (3.21) реестра версий нет (мост до 3.21) — засевается из отправленного соседу, номер продолжается
+    std::fs::remove_file(dev.data_dir.join("builds").join("versions.json")).unwrap();
+    std::fs::write(src.join("Game_Data/level0"), b"lvl2").unwrap();
+    bridge_node::builds::send(&dev, "stand", src.to_str().unwrap(), "Game", "patch").unwrap();
+    wait("5").await;
+    assert_eq!(bridge_node::builds::status(&dev)["history"][0]["n"], 3, "{}", bridge_node::builds::status(&dev));
+    assert_eq!(bridge_node::builds::latest_version(&dev, "Game", "Game", true)["n"], 3);
     assert!(bridge_node::builds::send(&dev, "stand", src.to_str().unwrap(), "../x", "clean").is_err());
     net.stop().await;
 }
@@ -1822,6 +1856,7 @@ async fn build_presets_ignore() {
     assert_eq!(got["history"].as_array().unwrap().len(), 2);
     assert_eq!(got["history"][1]["note"], "починил сохранения");
     // (3.11) версия без программы не сбрасывает «что запускать»; своё — главнее
+    std::fs::write(src.join("Game.exe"), b"exe3").unwrap();
     bridge_node::builds::send_full(&dev, "stand", src.to_str().unwrap(), "Game2", "patch", &[], "", "", "без exe").unwrap();
     for _ in 0..100 { if dev.builds.jobs.lock().is_empty() && bridge_node::builds::status(&dev)["history"][0]["n"] == 3 { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
     net.sync(1, &["stand"]).await;
@@ -2511,5 +2546,343 @@ async fn transfers_go_as_pack() {
         assert_eq!(net.read("stand", &format!("задания/z{}.md", i)).as_deref(), Some(format!("задание {}", i).as_str()));
     }
     assert!(net.logs.lock().iter().any(|l| l.contains("получено архивом: 5")), "пространство — архивом");
+    net.stop().await;
+}
+
+/// 3.21: «Отправить сейчас» — сосед забирает сборку сам, без обмена по расписанию; номер у всех один.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn build_send_now_wakes_receiver() {
+    let mut net = pair();
+    net.start().await;
+    let (dev, stand) = (net.n("dev").clone(), net.n("stand").clone());
+    let src = net.root.join("dev-build3");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("Game.exe"), b"exe").unwrap();
+    assert!(!stand.peer_state("dev").online, "стенд ещё не знает о разработке");
+    // упаковалась → «у меня новое» → стенд проверяет связь (сосед «из офлайна») и забирает сам, без обмена
+    let t0 = std::time::Instant::now();
+    bridge_node::builds::send(&dev, "stand", src.to_str().unwrap(), "Quick", "patch").unwrap();
+    let target = stand.base_dir.join("builds").join("Quick");
+    for _ in 0..200 { if target.join("Game.exe").exists() { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    assert!(target.join("Game.exe").exists(), "стенд забрал сам за {:?}: {}", t0.elapsed(), net.logs.lock().join("\n"));
+    assert!(t0.elapsed() < std::time::Duration::from_secs(8), "быстро: {:?}", t0.elapsed());
+    // «Отправить сейчас» — новая версия уходит по кнопке, тоже без обмена по расписанию
+    std::fs::write(src.join("Game.exe"), b"exe2").unwrap();
+    bridge_node::builds::send(&dev, "stand", src.to_str().unwrap(), "Quick", "patch").unwrap();
+    assert_eq!(dev.sync_peer("stand").await, Ok(true));
+    for _ in 0..200 { if std::fs::read(target.join("Game.exe")).unwrap_or_default() == b"exe2" { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    assert_eq!(std::fs::read(target.join("Game.exe")).unwrap(), b"exe2");
+    assert!(dev.sync_peer("нет-такого").await.is_err());
+    net.stop().await;
+}
+
+/// 3.21: доставка сборки по этапам — в отправке, забрал, распаковал (отчёт получателя в привете); запуск своей.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn build_delivery_report_and_run_own() {
+    let mut net = pair();
+    net.start().await;
+    net.sync(1, &["stand", "dev"]).await;
+    let (dev, stand) = (net.n("dev").clone(), net.n("stand").clone());
+    let src = net.root.join("dev-build4");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("run.sh"), "#!/bin/sh\necho ok > ran-own.txt\nsleep 2\n").unwrap();
+    bridge_node::builds::set_presets(&dev, &json!([{ "id": "g", "name": "Del", "path": src.to_str().unwrap(), "peers": ["stand"], "exe": "run.sh" }])).unwrap();
+    let st = |n: &std::sync::Arc<bridge_node::Node>| bridge_node::builds::status(n)["presets"][0]["delivery"][0].clone();
+    assert_eq!(st(&dev)["state"], "none");
+    // упаковка без соседа на связи: stand пока не забирает — выключим ему приём, чтобы застать «в отправке»
+    stand.cfg.write().peer_mut("dev").unwrap().enabled = false;
+    bridge_node::builds::send_preset(&dev, "g", None, "первая").unwrap();
+    for _ in 0..100 { if dev.builds.jobs.lock().is_empty() && st(&dev)["state"] == "waiting" { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    let d = st(&dev);
+    assert_eq!((d["state"].clone(), d["sent"].clone(), d["latest"].clone()), (json!("waiting"), json!(1), json!(1)), "{}", d);
+    stand.cfg.write().peer_mut("dev").unwrap().enabled = true;
+    net.sync(1, &["stand"]).await;
+    let target = stand.base_dir.join("builds").join("Del");
+    for _ in 0..100 { if target.join("run.sh").exists() { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    assert_eq!(bridge_node::builds::report_for(&stand, "dev")[0].n, 1);
+    // привет от стенда несёт отчёт — у разработки «распаковано»
+    net.sync(1, &["dev"]).await;
+    let mut d = json!(null);
+    for _ in 0..100 { d = st(&dev); if d["state"] == "unpacked" { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    assert_eq!((d["state"].clone(), d["has"].clone()), (json!("unpacked"), json!(1)), "{}", d);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(src.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        bridge_node::builds::run_own(&dev, "g").unwrap();
+        for _ in 0..50 { if src.join("ran-own.txt").exists() { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+        assert!(src.join("ran-own.txt").exists(), "своя сборка запустилась в своей папке");
+        assert_eq!(bridge_node::builds::status(&dev)["presets"][0]["running"], true);
+        bridge_node::builds::stop_own(&dev, "g").unwrap();
+        assert_eq!(bridge_node::builds::status(&dev)["presets"][0]["running"], false);
+    }
+    assert!(bridge_node::builds::run_own(&dev, "нет").is_err());
+    net.stop().await;
+}
+
+/// 3.21.1: приглашение — адрес этого ПК выбирается (лучший первым, можно свой); строка — с выбранным.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn invite_chosen_address() {
+    let mut net = pair();
+    net.start().await;
+    let dev = net.n("dev").clone();
+    let ch = bridge_node::link::invite_addresses(&dev);
+    assert!(!ch.is_empty(), "{:?}", ch);
+    assert_eq!(bridge_node::link::addr_kind("26.1.2.3").1, "Radmin");
+    assert_eq!(bridge_node::link::addr_kind("10.77.0.3").1, "своя сеть");
+    // (3.22.1) 100.64/10 — Tailscale только на его адаптере; на другом это адрес провайдера (CGNAT), он ниже внешнего
+    assert_eq!(bridge_node::link::addr_kind_on("100.70.1.2", Some("Tailscale")).1, "Tailscale");
+    assert_eq!(bridge_node::link::addr_kind_on("100.70.1.2", Some("tailscale0")).1, "Tailscale");
+    assert!(bridge_node::link::addr_kind_on("100.70.1.2", Some("Ethernet")).0 > bridge_node::link::addr_kind("8.8.8.8").0);
+    assert_eq!(bridge_node::link::addr_kind("192.168.1.10").1, "локальная сеть");
+    assert!(bridge_node::link::addr_kind("26.1.2.3").0 < bridge_node::link::addr_kind("192.168.1.10").0, "Radmin выше домашней сети");
+    let a = bridge_node::link::invite_address(&dev, "26.12.34.56").unwrap().unwrap();
+    assert!(a.starts_with("26.12.34.56:"), "{}", a);
+    assert_eq!(bridge_node::link::invite_address(&dev, "26.12.34.56:6000").unwrap().unwrap(), "26.12.34.56:6000");
+    assert!(bridge_node::link::invite_address(&dev, "мой-пк").is_err());
+    let (r, _) = bridge_node::link::invite_at(&dev, "друг", Some(a.clone()));
+    assert!(r.line.starts_with(&(a.clone() + " BRS-")), "{}", r.line);
+    assert_eq!(r.addresses[0], a);
+    net.stop().await;
+}
+
+/// 3.22: общая сборка — автор и соавтор патчат одну сборку, у получателя одна папка и номера подряд;
+/// патч считается от того, что лежит у получателя; посторонний патч не принимается.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shared_build_coauthors() {
+    let mut net = Net::new();
+    net.add("a", &["b", "c"], &[]);
+    net.add("b", &["a", "c"], &[]);
+    net.add("c", &["a", "b", "x"], &[]);
+    net.add("x", &["c"], &[]);
+    net.start().await;
+    let (a, b, c, x) = (net.n("a").clone(), net.n("b").clone(), net.n("c").clone(), net.n("x").clone());
+    let wait = |n: std::sync::Arc<bridge_node::Node>| async move {
+        for _ in 0..200 { if n.builds.jobs.lock().is_empty() { break; } tokio::time::sleep(std::time::Duration::from_millis(25)).await; }
+        // задание снимается чуть раньше, чем пишется история и кладётся архив
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    };
+    // последняя запись об отправке `peer` после `skip` уже бывших (ждём, пока появится)
+    async fn hist_out(n: &std::sync::Arc<bridge_node::Node>, peer: &str, skip: usize) -> Value {
+        for _ in 0..200 {
+            let outs: Vec<Value> = bridge_node::builds::status(n)["history"].as_array().unwrap().iter().filter(|e| e["dir"] == "out" && e["peer"] == peer).cloned().collect();
+            if outs.len() > skip { return outs[0].clone(); }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        json!(null)
+    }
+    // автор: проект из трёх файлов, получатели b и c, соавтор b
+    let src_a = net.root.join("a-build");
+    std::fs::create_dir_all(src_a.join("Data")).unwrap();
+    std::fs::write(src_a.join("game.exe"), "exe v1").unwrap();
+    std::fs::write(src_a.join("Data/level1.dat"), "level1 v1").unwrap();
+    std::fs::write(src_a.join("Data/big.dat"), "x".repeat(50_000)).unwrap();
+    let l = bridge_node::builds::set_presets(&a, &json!([{ "id": "g", "name": "Игра", "path": src_a.to_str().unwrap(), "peers": ["b", "c"], "authors": ["b"], "exe": "game.exe" }])).unwrap();
+    let gid = l[0]["gid"].as_str().unwrap().to_string();
+    assert_eq!((l[0]["owner"].clone(), l[0]["authors"].clone()), (json!("a"), json!(["b"])));
+    assert_eq!(bridge_node::builds::presets(&a)[0]["gid"], gid.as_str(), "GUID не меняется");
+    bridge_node::builds::send_preset(&a, "g", None, "первая").unwrap();
+    wait(a.clone()).await;
+    net.sync(2, &["b", "c"]).await;
+    let target_c = c.base_dir.join("builds").join("Игра");
+    for _ in 0..100 { if target_c.join("game.exe").exists() && b.base_dir.join("builds/Игра/game.exe").exists() { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    assert_eq!(std::fs::read_to_string(target_c.join("game.exe")).unwrap(), "exe v1");
+    assert_eq!(bridge_node::builds::registry(&c, &gid)["n"], 1);
+    // соавтор подхватывает: своя папка проекта, получатели — из сборки (c) и автор (a)
+    let src_b = net.root.join("b-build");
+    std::fs::create_dir_all(src_b.join("Data")).unwrap();
+    std::fs::write(src_b.join("game.exe"), "exe v1").unwrap();
+    std::fs::write(src_b.join("Data/level1.dat"), "level1 v2 от b").unwrap();
+    std::fs::write(src_b.join("Data/big.dat"), "x".repeat(50_000)).unwrap();
+    let st_b = bridge_node::builds::status(&b);
+    let rb = st_b["received"].as_array().unwrap().iter().find(|e| e["gid"] == gid.as_str()).cloned().unwrap();
+    assert_eq!((rb["canPatch"].clone(), rb["owner"].clone()), (json!(true), json!("a")), "{}", rb);
+    let ad = bridge_node::builds::adopt(&b, &gid, src_b.to_str().unwrap()).unwrap();
+    let mut pb: Vec<String> = ad["peers"].as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_string()).collect();
+    pb.sort();
+    assert_eq!(pb, vec!["a", "c"]);
+    assert!(bridge_node::builds::adopt(&b, &gid, src_b.to_str().unwrap()).is_err(), "второй раз — уже в заготовках");
+    let id_b = ad["id"].as_str().unwrap().to_string();
+    // b узнаёт от c, что у того №1 (привет), и шлёт №2 — только изменённый файл
+    net.sync(1, &["b"]).await;
+    bridge_node::builds::send_preset(&b, &id_b, None, "уровень 1 от b").unwrap();
+    wait(b.clone()).await;
+    let ob = hist_out(&b, "c", 0).await;
+    if ob.is_null() { for l in net.logs.lock().iter().filter(|l| l.contains("сборк")) { eprintln!("LOG {}", l); } eprintln!("BH {}", bridge_node::builds::status(&b)["history"]); }
+    assert_eq!((ob["n"].clone(), ob["files"].clone(), ob["mode"].clone()), (json!(2), json!(1), json!("patch")), "{}", ob);
+    net.sync(2, &["c", "a"]).await;
+    for _ in 0..100 { if std::fs::read_to_string(target_c.join("Data/level1.dat")).unwrap_or_default().contains("v2") { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    assert_eq!(std::fs::read_to_string(target_c.join("Data/level1.dat")).unwrap(), "level1 v2 от b", "та же папка у получателя");
+    let rc = bridge_node::builds::status(&c)["received"].as_array().unwrap().iter().filter(|e| e["gid"] == gid.as_str()).cloned().collect::<Vec<_>>();
+    assert_eq!(rc.len(), 1, "одна карточка: {:?}", rc);
+    assert_eq!((rc[0]["peer"].clone(), rc[0]["n"].clone(), rc[0]["by"].clone()), (json!("a"), json!(2), json!("b")), "{}", rc[0]);
+    // автор меняет другой файл: номер №3 (знает №2 по отчётам), база — набор №2 у получателя (файл от b не перетирается)
+    std::fs::write(src_a.join("game.exe"), "exe v3").unwrap();
+    std::fs::write(src_a.join("Data/level1.dat"), "level1 v2 от b").unwrap(); // автор подтянул правку соавтора
+    for _ in 0..100 { if a.base_dir.join("builds/Игра/Data/level1.dat").exists() { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    net.sync(1, &["a"]).await;
+    let pa = &bridge_node::builds::status(&a)["presets"][0];
+    assert_eq!(pa["latestKnown"], 2, "{}", pa);
+    bridge_node::builds::send_preset(&a, "g", None, "exe от автора").unwrap();
+    wait(a.clone()).await;
+    let oa = hist_out(&a, "c", 1).await;
+    if oa.is_null() { for l in net.logs.lock().iter().filter(|l| l.contains("сборк")) { eprintln!("LOG {}", l); } }
+    assert_eq!((oa["n"].clone(), oa["files"].clone()), (json!(3), json!(1)), "{}", oa);
+    net.sync(2, &["c"]).await;
+    for _ in 0..100 { if std::fs::read_to_string(target_c.join("game.exe")).unwrap_or_default() == "exe v3" { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    assert_eq!(std::fs::read_to_string(target_c.join("game.exe")).unwrap(), "exe v3");
+    assert_eq!(bridge_node::builds::registry(&c, &gid)["n"], 3);
+    // посторонний x подделывает заготовку с тем же GUID и собой в соавторах — c не принимает
+    // (3.22.1: панель GUID и автора чужой новой заготовке не даёт — у x своя сборка с тем же именем; она в ту же
+    // папку у c, где лежит общая, и не ставится; подделка GUID напрямую — в shared_build_forgery)
+    let src_x = net.root.join("x-build");
+    std::fs::create_dir_all(&src_x).unwrap();
+    std::fs::write(src_x.join("game.exe"), "вирус").unwrap();
+    bridge_node::builds::set_presets(&x, &json!([{ "id": "evil", "name": "Игра", "path": src_x.to_str().unwrap(), "peers": ["c"], "gid": gid, "owner": "a", "authors": ["x"] }])).unwrap();
+    bridge_node::builds::send_preset(&x, "evil", Some("patch"), "").unwrap();
+    wait(x.clone()).await;
+    net.sync(2, &["c"]).await;
+    let mut rejected = false;
+    for _ in 0..100 {
+        rejected = bridge_node::builds::status(&c)["history"].as_array().unwrap().iter().any(|e| e["peer"] == "x" && e["error"].as_str().unwrap_or("").contains("не её соавтор"));
+        if rejected { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(rejected, "патч от постороннего отвергнут");
+    assert_eq!(std::fs::read_to_string(target_c.join("game.exe")).unwrap(), "exe v3", "файлы не тронуты");
+    // автор убирает b из соавторов: со следующей версией c перестаёт принимать патчи от b
+    let mut l = bridge_node::builds::presets(&a);
+    l[0]["authors"] = json!([]);
+    bridge_node::builds::set_presets(&a, &json!(l)).unwrap();
+    std::fs::write(src_a.join("Data/big.dat"), "y".repeat(50_000)).unwrap();
+    bridge_node::builds::send_preset_to(&a, "g", None, "", "c").unwrap();
+    wait(a.clone()).await;
+    net.sync(2, &["c"]).await;
+    for _ in 0..100 { if bridge_node::builds::registry(&c, &gid)["n"] == 4 { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+    assert_eq!(bridge_node::builds::registry(&c, &gid)["authors"], json!([]));
+    std::fs::write(src_b.join("game.exe"), "exe от b после отзыва").unwrap();
+    bridge_node::builds::send_preset_to(&b, &id_b, None, "", "c").unwrap();
+    wait(b.clone()).await;
+    net.sync(2, &["c"]).await;
+    let mut rej_b = false;
+    for _ in 0..100 {
+        rej_b = bridge_node::builds::status(&c)["history"].as_array().unwrap().iter().any(|e| e["by"] == "b" && e["peer"] == "b" && e["error"].as_str().unwrap_or("").contains("не соавтор"));
+        if rej_b { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(rej_b, "после отзыва патч соавтора не принят");
+    net.stop().await;
+}
+
+/// 3.22: заготовка без GUID в запросе (старая панель, телефон) сохраняет прежний GUID, автора и соавторов; копия — новый GUID.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shared_build_gid_kept() {
+    let mut net = pair();
+    net.start().await;
+    let dev = net.n("dev").clone();
+    let l = bridge_node::builds::set_presets(&dev, &json!([{ "id": "g", "name": "Игра", "path": "", "peers": ["stand"], "authors": ["stand"] }])).unwrap();
+    let gid = l[0]["gid"].as_str().unwrap().to_string();
+    assert_eq!((l[0]["owner"].clone(), l[0]["authors"].clone()), (json!("dev"), json!(["stand"])));
+    let l = bridge_node::builds::set_presets(&dev, &json!([{ "id": "g", "name": "Игра 2", "path": "", "peers": ["stand"] }, { "id": "h", "name": "Копия", "path": "", "peers": [] }])).unwrap();
+    assert_eq!((l[0]["gid"].as_str().unwrap(), l[0]["authors"].clone()), (gid.as_str(), json!(["stand"])));
+    assert_ne!(l[1]["gid"], l[0]["gid"]);
+    // (3.22.1) GUID и автор прежней заготовки из запроса не меняются (устаревшая панель их не подменит)
+    let hg = l[1]["gid"].clone();
+    let l = bridge_node::builds::set_presets(&dev, &json!([{ "id": "g", "name": "А", "path": "" }, { "id": "h", "name": "Б", "path": "", "gid": gid, "owner": "stand" }])).unwrap();
+    assert_eq!((l[0]["gid"].as_str().unwrap(), l[1]["gid"].clone(), l[1]["owner"].clone()), (gid.as_str(), hg, json!("dev")));
+    // новая заготовка с чужим GUID — получает свой
+    let l = bridge_node::builds::set_presets(&dev, &json!([{ "id": "z", "name": "В", "path": "", "gid": gid, "owner": "stand" }])).unwrap();
+    assert!(l[0]["gid"] != gid.as_str() && l[0]["owner"] == "dev", "{}", l[0]);
+    net.stop().await;
+}
+
+/// Положить соседу `to` архив сборки вручную (подделка: свой META) — как его положил бы мост `from`.
+fn drop_build(from: &std::sync::Arc<bridge_node::Node>, to: &str, name: &str, tag: &str, meta: Value, files: &[(&str, &str)]) {
+    use std::io::Write;
+    let dir = from.mailbox.out_root(from).join(to).join("_builds").join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join(format!("patch-{}.zip", tag));
+    {
+        let mut z = zip::ZipWriter::new(std::fs::File::create(&f).unwrap());
+        let o = zip::write::SimpleFileOptions::default();
+        z.start_file("_most-build.json", o).unwrap();
+        z.write_all(meta.to_string().as_bytes()).unwrap();
+        for (p, t) in files {
+            z.start_file(*p, o).unwrap();
+            z.write_all(t.as_bytes()).unwrap();
+        }
+        z.finish().unwrap();
+    }
+    bridge_core::files::set_mtime(&f, &(bridge_core::time::now() - chrono::Duration::seconds(5)));
+    from.mailbox.mark_ready(&f);
+    from.mailbox.dirty.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// 3.22.1: подделки общих сборок. Первую версию ставит только автор (чужой «автор» в META не принимается);
+/// обычная сборка с тем же именем не ложится в папку общей; номер — только от тех, кто вправе; отказ соавтору —
+/// с GUID и номером: соавтор видит его в доставке.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shared_build_forgery() {
+    let mut net = Net::new();
+    net.add("a", &["b", "c", "x"], &[]);
+    net.add("b", &["a", "c"], &[]);
+    net.add("c", &["a", "b", "x"], &[]);
+    net.add("x", &["a", "c"], &[]);
+    net.start().await;
+    let (a, b, c, x) = (net.n("a").clone(), net.n("b").clone(), net.n("c").clone(), net.n("x").clone());
+    let hist = |n: &std::sync::Arc<bridge_node::Node>| bridge_node::builds::status(n)["history"].as_array().unwrap().clone();
+    async fn until(f: impl Fn() -> bool) -> bool {
+        for _ in 0..120 { if f() { return true; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+        false
+    }
+    // 1) x называет автором a и себя соавтором — c не ставит: первую версию ставит автор
+    let fake = "0f0f0f0f-0000-4000-8000-000000000001";
+    drop_build(&x, "c", "Чужая", "1", json!({ "name": "Чужая", "mode": "clean", "first": true, "n": 1, "gid": fake, "owner": "a", "authors": ["x"], "exe": "game.exe" }), &[("game.exe", "вирус")]);
+    net.sync(2, &["x", "c"]).await;
+    assert!(until(|| hist(&c).iter().any(|e| e["peer"] == "x" && e["error"].as_str().unwrap_or("").contains("первую версию"))).await, "{:?}", hist(&c));
+    assert!(bridge_node::builds::registry(&c, fake).is_null());
+    assert!(!c.base_dir.join("builds/Чужая/game.exe").exists());
+    // настоящая: автор a, соавтор b, получатель c — №1
+    let src_a = net.root.join("a-build");
+    std::fs::create_dir_all(&src_a).unwrap();
+    std::fs::write(src_a.join("game.exe"), "exe v1").unwrap();
+    let l = bridge_node::builds::set_presets(&a, &json!([{ "id": "g", "name": "Игра", "path": src_a.to_str().unwrap(), "peers": ["c"], "authors": ["b"], "exe": "game.exe" }])).unwrap();
+    let gid = l[0]["gid"].as_str().unwrap().to_string();
+    bridge_node::builds::send_preset(&a, "g", None, "").unwrap();
+    net.sync(2, &["a", "c"]).await;
+    assert!(until(|| bridge_node::builds::registry(&c, &gid)["n"] == 1).await);
+    // 2) обычная сборка от x с тем же именем — в ту же папку у c не ложится
+    drop_build(&x, "c", "Игра", "2", json!({ "name": "Игра", "mode": "clean", "n": 1, "exe": "game.exe" }), &[("game.exe", "вирус")]);
+    net.sync(2, &["x", "c"]).await;
+    assert!(until(|| hist(&c).iter().any(|e| e["peer"] == "x" && e["name"] == "Игра" && e["error"].as_str().unwrap_or("").contains("не её соавтор"))).await, "{:?}", hist(&c));
+    assert_eq!(std::fs::read_to_string(c.base_dir.join("builds/Игра/game.exe")).unwrap(), "exe v1");
+    // испорченный номер не принимается
+    drop_build(&b, "c", "Игра", "3", json!({ "name": "Игра", "mode": "patch", "n": "много", "gid": gid, "owner": "a" }), &[("game.exe", "b")]);
+    net.sync(2, &["b", "c"]).await;
+    assert!(until(|| hist(&c).iter().any(|e| e["by"] == "b" && e["error"].as_str().unwrap_or("").contains("номер"))).await, "{:?}", hist(&c));
+    // 3) номер: отчёт постороннего (x) и нелепый номер не учитываются, получателя (c) — да
+    let rep = |n: u64| bridge_core::proto::BuildReport { name: "Игра".into(), n, ok: true, gid: gid.clone(), digest: "ab".repeat(32), ..Default::default() };
+    a.with_peer_state("x", |s| s.builds = vec![rep(u64::MAX)]);
+    a.with_peer_state("c", |s| s.builds = vec![rep(7)]);
+    assert_eq!(bridge_node::builds::status(&a)["presets"][0]["latestKnown"], 7);
+    a.with_peer_state("c", |s| s.builds = vec![rep(u64::MAX)]);
+    assert_eq!(bridge_node::builds::status(&a)["presets"][0]["latestKnown"], 0, "нелепый номер не берётся");
+    a.with_peer_state("c", |s| s.builds.clear());
+    a.with_peer_state("x", |s| s.builds.clear());
+    // 4) автор выпускает №2; соавтор b присылает №1 — отказ с GUID и номером, b видит его в отчёте, автор — нет
+    std::fs::write(src_a.join("game.exe"), "exe v2").unwrap();
+    bridge_node::builds::send_preset(&a, "g", None, "").unwrap();
+    net.sync(2, &["a", "c"]).await;
+    assert!(until(|| bridge_node::builds::registry(&c, &gid)["n"] == 2).await);
+    drop_build(&b, "c", "Игра", "4", json!({ "name": "Игра", "mode": "patch", "n": 1, "gid": gid, "owner": "a" }), &[("game.exe", "старьё")]);
+    net.sync(2, &["b", "c"]).await;
+    assert!(until(|| hist(&c).iter().any(|e| e["by"] == "b" && e["gid"] == gid.as_str() && e["n"] == 1 && e["error"].as_str().unwrap_or("").contains("старую"))).await, "{:?}", hist(&c));
+    let rb = bridge_node::builds::report_for(&c, "b").into_iter().find(|r| r.gid == gid).unwrap();
+    assert!(!rb.ok && rb.n == 1 && rb.error.contains("старую"), "{:?}", rb);
+    let ra = bridge_node::builds::report_for(&c, "a").into_iter().find(|r| r.gid == gid).unwrap();
+    assert!(ra.ok && ra.n == 2, "{:?}", ra);
+    assert_eq!(std::fs::read_to_string(c.base_dir.join("builds/Игра/game.exe")).unwrap(), "exe v2");
+    let cards = bridge_node::builds::status(&c)["received"].as_array().unwrap().iter().filter(|e| e["name"] == "Игра").count();
+    assert_eq!(cards, 2, "общая (a) и отвергнутая обычная от x");
     net.stop().await;
 }

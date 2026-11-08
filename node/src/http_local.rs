@@ -70,6 +70,7 @@ pub fn routes() -> Router<Arc<Node>> {
         .route(&l("peers/remove"), post(peer_remove))
         .route(&l("peers/connect"), post(peer_connect))
         .route(&l("peers/invite"), post(peer_invite))
+        .route(&l("peers/addresses"), get(|State(n): St| async move { ok_json(&json!({ "choices": link::invite_addresses(&n) })) }))
         .route(&l("peers/check"), get(peer_check))
         .route(&l("peers/rename"), post(peer_rename))
         .route(&l("groups"), get(groups_get).post(groups_set))
@@ -102,8 +103,22 @@ pub fn routes() -> Router<Arc<Node>> {
         }))
         .route(&l("builds/presets"), get(|State(n): St| async move { ok_json(&json!({ "list": crate::builds::presets(&n) })) }).post(builds_presets))
         .route(&l("builds/preview"), post(builds_preview))
-        .route(&l("builds/run"), post(|State(n): St, Json(v): Json<Value>| async move { match crate::builds::run(&n, v["peer"].as_str().unwrap_or(""), v["name"].as_str().unwrap_or("")) { Ok(v) => ok_json(&v), Err(e) => err(400, e) } }))
-        .route(&l("builds/stop"), post(|State(n): St, Json(v): Json<Value>| async move { match crate::builds::stop(&n, v["peer"].as_str().unwrap_or(""), v["name"].as_str().unwrap_or("")) { Ok(v) => ok_json(&v), Err(e) => err(400, e) } }))
+        // (3.22) {gid, path} — присланную общую сборку патчить и отсюда: своя заготовка с тем же GUID
+        .route(&l("builds/adopt"), post(|State(n): St, Json(v): Json<Value>| async move {
+            if n.remote.active().is_some() {
+                return err(423, "пока этим ПК управляют, менять нельзя");
+            }
+            match crate::builds::adopt(&n, v["gid"].as_str().unwrap_or(""), v["path"].as_str().unwrap_or("")) { Ok(v) => ok_json(&v), Err(e) => err(400, e) }
+        }))
+        // {peer, name} — присланная; {preset} — своя (3.21), из папки заготовки
+        .route(&l("builds/run"), post(|State(n): St, Json(v): Json<Value>| async move {
+            let r = match v["preset"].as_str().filter(|p| !p.is_empty()) { Some(id) => crate::builds::run_own(&n, id), None => crate::builds::run(&n, v["peer"].as_str().unwrap_or(""), v["name"].as_str().unwrap_or("")) };
+            match r { Ok(v) => ok_json(&v), Err(e) => err(400, e) }
+        }))
+        .route(&l("builds/stop"), post(|State(n): St, Json(v): Json<Value>| async move {
+            let r = match v["preset"].as_str().filter(|p| !p.is_empty()) { Some(id) => crate::builds::stop_own(&n, id), None => crate::builds::stop(&n, v["peer"].as_str().unwrap_or(""), v["name"].as_str().unwrap_or("")) };
+            match r { Ok(v) => ok_json(&v), Err(e) => err(400, e) }
+        }))
         .route(&l("mailbox/cancel"), post(mailbox_cancel))
         .route(&l("mailbox/incoming"), get(mailbox_incoming))
         .route(&l("mailbox/incoming/file"), get(mailbox_incoming_file))
@@ -540,7 +555,14 @@ where
     futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|v| (v, rx)) })
 }
 
-async fn sync(State(node): St) -> Response {
+async fn sync(State(node): St, Query(q): Query<HashMap<String, String>>) -> Response {
+    // (3.21) с одним соседем: «Отправить сейчас»
+    if let Some(p) = q.get("peer").filter(|p| !p.is_empty()) {
+        return match node.sync_peer(p).await {
+            Ok(online) => ok_json(&json!({ "ok": true, "online": online, "error": node.peer_state(p).error })),
+            Err(e) => err(404, e),
+        };
+    }
     node.folders.invalidate_own();
     for rt in node.shares() {
         rt.files_dirty.store(true, Ordering::SeqCst);
@@ -769,7 +791,12 @@ async fn peer_connect(State(node): St, body: axum::body::Bytes) -> Response {
 }
 
 async fn peer_invite(State(node): St, Query(m): Q) -> Response {
-    let (r, warning) = link::invite(&node, q(&m, "title"));
+    // (3.21.1) ?address — какой адрес этого ПК дать соседу (иначе — лучший из своих)
+    let addr = match link::invite_address(&node, q(&m, "address")) {
+        Ok(a) => a,
+        Err(e) => return err(400, e),
+    };
+    let (r, warning) = link::invite_at(&node, q(&m, "title"), addr);
     ok_json(&json!({ "ok": true, "name": r.name, "secret": r.secret, "addresses": r.addresses, "line": r.line, "warning": warning }))
 }
 
@@ -1106,7 +1133,8 @@ async fn builds_preview(State(node): St, Json(v): Json<Value>) -> Response {
 async fn builds_send(State(node): St, Json(v): Json<Value>) -> Response {
     let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
     if !s("preset").is_empty() {
-        return match crate::builds::send_preset(&node, &s("preset"), Some(&s("mode")), &s("note")) {
+        // (3.21) {preset, peer} — только этому получателю («Повторить» у одного)
+        return match crate::builds::send_preset_to(&node, &s("preset"), Some(&s("mode")), &s("note"), &s("peer")) {
             Ok(r) => ok_json(&r),
             Err((c, e)) => err(c, e),
         };
@@ -1784,7 +1812,7 @@ async fn media_ice(State(node): St, dev: Option<axum::Extension<crate::mobile::F
         }
     }
     // телефону ретрансляторы соседей не нужны (Radmin и т. п. ему недоступны): только свой ПК
-    let peers: Vec<(String, String)> = if dev.is_some() { Vec::new() } else { node.cfg.read().peers.iter().filter(|p| p.enabled && p.has_url()).map(|p| (p.name.clone(), node.peer_url(p))).collect() };
+    let peers: Vec<(String, String)> = if dev.is_some() { Vec::new() } else { node.cfg.read().peers.iter().filter(|p| p.enabled && p.has_url()).map(|p| (p.name.clone(), node.peer_url(p))).filter(|(_, u)| !node.tunnel.is_tunnel_url(u)).collect() };
     for (name, url) in peers {
         let st = node.peer_state(&name);
         let (Some(t), true) = (st.turn, st.online) else { continue };
@@ -1806,6 +1834,7 @@ struct RelaySet {
     mode: Option<String>,
     share: Option<bool>,
     files: Option<bool>,
+    link: Option<bool>,
 }
 
 /// Свой сервер-ретранслятор: состояние (ключ с сервера, ошибка, пинг) и настройки.
@@ -1828,7 +1857,7 @@ async fn relay_get(State(node): St) -> Response {
             })
             .collect()
     };
-    ok_json(&json!({ "status": st, "fromPeers": used, "files": rc.files, "net": rc.net, "netUp": node.mostnet_up.load(std::sync::atomic::Ordering::Relaxed) }))
+    ok_json(&json!({ "status": st, "fromPeers": used, "files": rc.files, "net": rc.net, "netUp": node.mostnet_up.load(std::sync::atomic::Ordering::Relaxed), "link": rc.link, "linkUp": node.tunnel.up.load(std::sync::atomic::Ordering::Relaxed), "linkSupported": st.links.unwrap_or(false) }))
 }
 
 async fn relay_set(State(node): St, Json(b): Json<RelaySet>) -> Response {
@@ -1857,6 +1886,9 @@ async fn relay_set(State(node): St, Json(b): Json<RelaySet>) -> Response {
             }
             if let Some(f) = b.files {
                 c.relay.files = f;
+            }
+            if let Some(l) = b.link {
+                c.relay.link = l;
             }
         }
         if let Some(e) = node.save_config() {
@@ -1996,10 +2028,10 @@ async fn api_index() -> Response {
         "ui": "POST ui {action, …} — пульт панели: state, join {channel, quiet?}, leave, mic {on}, deafen {on}, volume {peer, value}, call {peers}, answer {room?}, decline {room?}, share {quality?}, unshare {id?}, watch {peer|stream, on?}, popout {peer|stream}, ask_screen {peer}, tab {tab}, board_png {room, ids?|area?, scale?} → {path}, board_view {room, ids?|area?|x,y}, screen_shot {peer|stream} → {path}, screen_point {peer, x, y}, screen_draw {peer, points}, screen_clear {peer}",
         "docs": "полный справочник — API.md рядом с программой",
         "calls": [
-            "GET overview — всё для панели", "GET status", "GET peers", "POST peers/connect {address, secret?, title?}", "POST peers/invite?title",
+            "GET overview — всё для панели", "GET status", "GET peers", "POST peers/connect {address, secret?, title?}", "POST peers/invite?title&address (3.21.1: GET peers/addresses — свои адреса, лучший первым)",
             "GET peers/check[?name]", "POST peers/rename?name&to", "POST peers/remove?name", "POST peers {name, title?, ip?, port?, extraIps?, secret?, enabled?, shares?, groups?}",
             "GET groups", "POST groups {id, title, members}", "POST groups/remove?id", "GET access — кто что видит",
-            "POST mailbox/upload?peer&path (тело — файл)", "POST upload/part?id&offset (большие файлы частями; затем вызов с ?upload=id&size=N)", "GET builds", "GET mounts/plan?peer&id&force=push|take", "POST mounts/force {peer, id, mode: push|take}", "POST folders/force {id}", "POST builds/send {peer, path, name, mode: patch|clean}", "POST builds/target {peer, name, path}", "POST builds/exe {peer, name, exe}", "GET mailbox/outgoing", "POST mailbox/cancel?peer&path", "GET mailbox/incoming", "GET mailbox/incoming/file?path",
+            "POST mailbox/upload?peer&path (тело — файл)", "POST upload/part?id&offset (большие файлы частями; затем вызов с ?upload=id&size=N)", "GET builds", "GET mounts/plan?peer&id&force=push|take", "POST mounts/force {peer, id, mode: push|take}", "POST folders/force {id}", "POST builds/send {peer, path, name, mode: patch|clean} | {preset, mode?, note?, peer?}; POST builds/run|stop {peer, name} | {preset} (3.21: своя)", "POST builds/target {peer, name, path}", "POST builds/exe {peer, name, exe}; POST builds/adopt {gid, path} (3.22: патчить общую сборку)", "GET mailbox/outgoing", "POST mailbox/cancel?peer&path", "GET mailbox/incoming", "GET mailbox/incoming/file?path",
             "GET folders", "POST folders {id, title, path, access:{сосед|@группа|*: read|write}}", "POST folders/remove?id", "GET fs/list?kind&id[&peer]", "POST fs/upload?kind&id[&peer]&path", "POST fs/delete", "GET fs/file",
             "GET ignore", "POST ignore {scope, id, peer, patterns}", "POST ignore/add|remove {scope, id, peer, pattern}", "GET ignore/test?path[&scope&id&peer]",
             "GET records[?share&type&status&assignee&q]", "GET records/{id}", "GET records/{id}/history", "POST actions {action, …}", "GET wait?share&after&timeout",
@@ -2007,7 +2039,7 @@ async fn api_index() -> Response {
             "GET relay — свой сервер-ретранслятор (most-relay); POST relay {invite?: строка с сервера (5 минут, один раз) | \"\" — отключить, mode?: auto|always|off, share?}; POST relay/check", "GET mostnet — своя локальная сеть (служба most-net, адрес 10.77.x.y, соседи); POST mostnet {enabled}; POST mostnet/install | mostnet/uninstall (Windows, подтверждение администратора)",
             "GET transfers — идущие передачи (процент, скорость, осталось)", "POST folders/settings?upMbit&downMbit&maxFileMb&trashMinutes",
             "POST mailbox/send {peer, path, dest?}", "GET changelog", "GET agent", "POST agent/ask {peer, prompt, thread?}", "GET agent/wait?id&after&timeout", "POST agent/stop?id", "POST agent/request {thread, question, buttons?, input?}", "GET agent/request/wait?thread&id&timeout", "POST agent/answer {thread, req, answer}",
-            "POST sync", "GET log?lines", "POST media/signal {to, type, room, …}", "GET media/stream (SSE)", "POST open?target",
+            "POST sync[?peer] (3.21: ?peer — с одним соседем, «Отправить сейчас»)", "GET log?lines", "POST media/signal {to, type, room, …}", "GET media/stream (SSE)", "POST open?target",
             "GET chat — беседы", "GET chat/messages?conv&after&timeout", "POST chat/send {conv | to | channel, text, author?}", "POST chat/read?conv",
             "GET devices — телефоны", "POST devices/pair {rights?} — код и QR для подключения", "POST devices {id, name?, rights?}", "POST devices/remove?id",
             "POST devices/send {device?, path, name?} — файл с диска на телефон", "POST devices/upload?device&path (тело — файл)",

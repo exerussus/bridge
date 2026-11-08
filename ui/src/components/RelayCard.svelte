@@ -7,13 +7,13 @@
 
   let st: any = $state({});
   let fromPeers: any[] = $state([]);
-  let files = $state(false), net = $state(false), netUp = $state(false);
+  let files = $state(false), net = $state(false), netUp = $state(false), link = $state(true), linkUp = $state(false), linkSupported = $state(false);
   let line = $state('');
   let busy = $state(false);
   let timer: any;
 
   async function load() {
-    try { const r = await api('GET', 'relay'); st = r.status || {}; fromPeers = r.fromPeers || []; files = !!r.files; net = !!r.net; netUp = !!r.netUp; } catch {}
+    try { const r = await api('GET', 'relay'); st = r.status || {}; fromPeers = r.fromPeers || []; files = !!r.files; net = !!r.net; netUp = !!r.netUp; link = r.link !== false; linkUp = !!r.linkUp; linkSupported = !!r.linkSupported; } catch {}
   }
   async function set(body: any, ok: string) {
     busy = true;
@@ -41,6 +41,12 @@
     : !net ? 'не действует: включите «Своя локальная сеть» ниже — файлы идут по ней'
     : !netUp ? 'не действует: своя сеть на этом ПК ещё не подключилась'
     : 'действует — с соседями, у которых тоже включена своя сеть' + (st.netMbit ? ' · скорость на сервере ограничена ' + st.netMbit + ' Мбит/с' : ''));
+  const linkNote = $derived(
+    !link ? 'выключено — с соседями только напрямую, через Radmin и свою сеть'
+    : !st.configured || !st.ok ? 'не действует: свой сервер не на связи'
+    : !linkSupported ? 'не действует: обновите сервер до 3.20 (relay/README.md, «Обновление»)'
+    : !linkUp ? 'подключаюсь к серверу…'
+    : 'готово — с соседями на этом же сервере, когда иначе не выходит (у них тоже Мост 3.20+)');
   const until = (t: number) => (t ? new Date(t * 1000).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '');
   const MODES: [string, string, string][] = [
     ['auto', 'Если напрямую не вышло', 'WebRTC сам пробует прямой путь (и Radmin) первым; сервер — только когда не прошло'],
@@ -92,6 +98,11 @@
     Файлы и синхронизация с соседями — через сервер (когда напрямую или через Radmin медленно)
   </label>
   <div class="small muted relay-line" style="padding-left:22px" title={filesNote}>{filesNote}</div>
+  <label class="small" style="display:block;margin-top:6px">
+    <input type="checkbox" checked={link} disabled={busy} onchange={(e) => set({ link: (e.target as HTMLInputElement).checked }, 'Сохранено')} />
+    Связь с соседями через сервер, если иначе не выходит — без Radmin, без своей сети и без прав администратора
+  </label>
+  <div class="small muted relay-line" style="padding-left:22px" title={linkNote}>{linkNote}</div>
   <div class="small muted" style="margin-top:6px">Как поставить сервер на VPS — <span class="mono">relay/README.md</span> в папке проекта. Приглашение печатает на сервере <span class="mono">most-relay invite</span> — оно живёт 5 минут и срабатывает один раз; дальше мост пользуется своим ключом.</div>
 </div>
 

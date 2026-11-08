@@ -146,11 +146,13 @@ impl Tun {
             return Ok(());
         }
         let _ = run("netsh", &["interface", "ipv4", "set", "subinterface", IFNAME, &format!("mtu={}", bridge_core::mostnet::MTU), "store=active"]);
-        // низкая метрика — чтобы широковещательные пакеты игр (255.255.255.255) шли и сюда; сеть — «частная»
+        // (3.19.3) метрика 100 — ниже по приоритету, чем настоящая сеть (Ethernet/Wi-Fi — 25..50) и Radmin (1):
+        // адаптер без шлюза с низкой метрикой могли принять за «основную» сеть (подозрение: Radmin висит на
+        // «Подключение…»); в адаптер всё равно идёт только 10.77.0.0/16. Сеть — «частная»
         // (иначе брандмауэр Windows режет входящие); профиль сети появляется не сразу — пробуем минуту
         let alive = self.alive.clone();
         std::thread::spawn(move || {
-            let _ = run("powershell", &["-NoProfile", "-Command", &format!("Set-NetIPInterface -InterfaceAlias '{}' -InterfaceMetric 5", IFNAME)]);
+            let _ = run("powershell", &["-NoProfile", "-Command", &format!("Set-NetIPInterface -InterfaceAlias '{}' -InterfaceMetric 100", IFNAME)]);
             // (3.19.2) и дальше следить: Windows может опознать сеть заново и сделать её «общественной» —
             // тогда брандмауэр режет Мост и игры из своей сети. Проверка ничего не меняет, если уже «частная».
             let cmd = format!("$p = Get-NetConnectionProfile -InterfaceAlias '{0}' -ErrorAction Stop; if ($p.NetworkCategory -ne 'Private') {{ Set-NetConnectionProfile -InterfaceAlias '{0}' -NetworkCategory Private -ErrorAction Stop }}", IFNAME);

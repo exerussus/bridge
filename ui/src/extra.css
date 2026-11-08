@@ -242,6 +242,7 @@ body.bdfull .modal{z-index:70}
 .stmenu button:hover{background:rgba(160,170,255,.1)}
 .stmenu button.on{background:rgba(56,225,240,.12);color:var(--cyan)}
 .stmenu .sticon{width:18px;height:18px}
+.stmenu .pmi{width:18px;flex-shrink:0;text-align:center;font-size:14px;color:var(--muted)}
 .stmenu .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .stmenu .stmsep{height:1px;background:var(--line);margin:4px 2px}
 .stmenu .stmn{font-size:12px;color:var(--muted);padding:4px 8px}

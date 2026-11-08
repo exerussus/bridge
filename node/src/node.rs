@@ -68,6 +68,9 @@ pub struct PeerState {
     /// Сосед просит гонять файлы через сервер (его галочка, 3.19).
     #[serde(skip)]
     pub wants_bulk: bool,
+    /// (3.21) Что у соседа распаковалось из наших сборок (из его привета).
+    #[serde(skip)]
+    pub builds: Vec<bridge_core::proto::BuildReport>,
     /// Ассистент живёт у соседа (из его привета).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assistant: Option<bridge_core::proto::AssistantInfo>,
@@ -171,6 +174,8 @@ pub struct Node {
     pub turn: crate::turn::Turn,
     /// Свой сервер-ретранслятор (most-relay): ключ с сервера и состояние.
     pub relay: crate::relay::Relay,
+    /// Связь с соседями через свой сервер (3.20).
+    pub tunnel: crate::tunnel::Tunnel,
     /// Ассистент: очередь входящих (на хозяине) и чат панели.
     pub assistant: crate::assistant::Assistant,
     /// Чаты: личные и каналов (сутки).
@@ -193,6 +198,10 @@ pub struct Node {
     pub config_lock: Mutex<()>,
     pub watcher: Mutex<Option<Watcher>>,
     pub sync_requested: AtomicBool,
+    /// (3.21) Проверка связи со всеми идёт в фоне — обмен с теми, кто ответил, не ждёт молчащих.
+    contacting: Arc<AtomicBool>,
+    /// (3.21) Когда последний раз проверяли связь с соседем, постучавшимся к нам «из офлайна».
+    probes: Mutex<std::collections::HashMap<String, Instant>>,
     last_round: Mutex<Option<Instant>>,
     last_full_scan: Mutex<Instant>,
     /// Последнее событие файловой системы: изменения обрабатываются, когда в папках «стихло» (удаление тысячи файлов —
@@ -263,6 +272,7 @@ impl Node {
             mobile: Default::default(),
             turn: Default::default(),
             relay: Default::default(),
+            tunnel: Default::default(),
             assistant: Default::default(),
             chat: Default::default(),
             updates: Default::default(),
@@ -279,6 +289,8 @@ impl Node {
             config_lock: Mutex::new(()),
             watcher: Mutex::new(None),
             sync_requested: AtomicBool::new(false),
+            contacting: Arc::new(AtomicBool::new(false)),
+            probes: Mutex::new(Default::default()),
             last_round: Mutex::new(None),
             last_full_scan: Mutex::new(Instant::now()),
             last_fs_event: Mutex::new(Instant::now() - Duration::from_secs(60)),
@@ -331,6 +343,7 @@ impl Node {
         crate::turn::bind_all(&node).await;
         crate::relay::schedule(&node);
         crate::mostnet::schedule(&node);
+        crate::tunnel::schedule(&node);
         node.runner.recover(&node);
         *node.watcher.lock() = Watcher::start(&node);
         let n2 = node.clone();
@@ -487,6 +500,10 @@ impl Node {
                     v.push(format!("http://{}:{}", a, port));
                 }
             }
+        }
+        // (3.20) последним — через свой сервер, если сосед на том же сервере
+        if let Some(u) = self.tunnel.url_for(self, peer) {
+            v.push(u);
         }
         let mut seen = std::collections::HashSet::new();
         v.retain(|u| seen.insert(u.clone()));
@@ -742,7 +759,15 @@ impl Node {
         let quiet = self.last_fs_event.lock().elapsed() >= Duration::from_millis(1000);
         if due || requested {
             *self.last_round.lock() = Some(Instant::now());
-            crate::link::contact_all(self).await;
+            // (3.21) в фоне: раньше обмен ждал самого медленного соседа (до 20 с на неотвечающего),
+            // и только потом забирал отправку у тех, кто ответил сразу. Ответивший «из офлайна» будит обмен сам.
+            if !self.contacting.swap(true, Ordering::SeqCst) {
+                let (n, flag) = (self.clone(), self.contacting.clone());
+                tokio::spawn(async move {
+                    crate::link::contact_all(&n).await;
+                    flag.store(false, Ordering::SeqCst);
+                });
+            }
         }
         for rt in self.shares() {
             if due || requested || rt.wake.swap(false, Ordering::SeqCst) {
@@ -794,6 +819,55 @@ impl Node {
         }
         self.mailbox.round(self).await;
         self.folders.round(self).await;
+    }
+
+    /// (3.21) Сосед появился на связи: обменяться с ним сразу и сказать ему, что у нас для него может быть отправка.
+    pub fn on_peer_online(self: &Arc<Self>, name: &str) {
+        self.mailbox.wake.store(true, Ordering::SeqCst);
+        self.folders.wake.store(true, Ordering::SeqCst);
+        for rt in self.shares() {
+            rt.wake.store(true, Ordering::SeqCst);
+        }
+        self.notify_peers(vec![name.to_string()], "", "mailbox");
+        self.wake.notify_one();
+    }
+
+    /// (3.21) Сосед постучался, а у нас он «не на связи» — проверить связь с ним сейчас (не чаще раза в 5 с).
+    pub fn probe_peer(self: &Arc<Self>, name: &str) {
+        if self.peer_state(name).online {
+            return;
+        }
+        {
+            let mut g = self.probes.lock();
+            if g.get(name).map(|t| t.elapsed() < Duration::from_secs(5)).unwrap_or(false) {
+                return;
+            }
+            g.insert(name.to_string(), Instant::now());
+        }
+        let Some(pc) = self.cfg.read().peer(name).filter(|p| p.enabled).cloned() else { return };
+        let n = self.clone();
+        tokio::spawn(async move {
+            let _ = tokio::time::timeout(Duration::from_secs(20), crate::link::contact(&n, &pc)).await;
+        });
+    }
+
+    /// (3.21) «Отправить сейчас»: связаться с одним соседем и попросить его забрать отправку и сборки прямо сейчас.
+    pub async fn sync_peer(self: &Arc<Self>, name: &str) -> Result<bool, String> {
+        let pc = self.cfg.read().peer(name).cloned().ok_or_else(|| format!("нет соседа «{}»", name))?;
+        if !pc.enabled {
+            return Err(format!("«{}» выключен", pc.name));
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(20), crate::link::contact(self, &pc)).await;
+        let st = self.peer_state(&pc.name);
+        if !st.online {
+            return Ok(false);
+        }
+        self.notify_peers(vec![pc.name.clone()], "", "mailbox");
+        self.notify_peers(vec![pc.name.clone()], "", "folders");
+        self.mailbox.wake.store(true, Ordering::SeqCst);
+        self.folders.wake.store(true, Ordering::SeqCst);
+        self.wake.notify_one();
+        Ok(true)
     }
 
     pub fn request_sync(&self) {

@@ -227,7 +227,7 @@ export async function roomJoin(key: string, quiet = false) {
   if (!c) { toast('Канал не найден — обновите список', 'bad'); return; }
   await loadIce();
   api('POST', 'media/local', { type: 'takeover', room: key, session: SESSION, dev: 'ПК' }).catch(() => {});
-  Object.assign(R, { key, title: c.title, members: [...new Set([...c.members, ME()])], voice, mic: true, deaf: false, watching: new Set(), quiet });
+  Object.assign(R, { key, title: c.title, members: [...new Set([...c.members, ME()])], voice, mic: R.mic !== false, deaf: !!R.deaf, watching: new Set(), quiet }); // (3.21) заглушились заранее — входим заглушёнными
   if (voice) {
     try { R.local = await micStream(); meter('__me', R.local!); }
     catch (e: any) { toast('Микрофон: ' + e.message + ' — вошли без микрофона (подключить снова — «Канал» → «Подключить микрофон»)', 'bad'); R.voice = false; }
@@ -253,6 +253,9 @@ export function roomLeave(quiet = false) {
   if (ROSTER[R.key] && !quiet) delete ROSTER[R.key][ME()];
   if (R.forced) { R.forced = ''; muteIndicate(''); }
   for (const f of leaveHooks) try { f(quiet); } catch {}
+  for (const n of Object.keys(MSRC)) unmeter(n);
+  for (const n of Object.keys(HL)) delete HL[n];
+  for (const n of Object.keys(ORPH)) delete ORPH[n];
   Object.assign(R, { key: null, title: '', members: [], local: null, pcs: {}, mine: {}, remote: {}, watching: new Set(), popups: {}, meters: {}, ended: {}, seen: {} });
   CHT.roomConv = '';
   document.querySelectorAll('audio[id^=ra-]').forEach(a => a.remove());
@@ -274,10 +277,15 @@ addEventListener('keydown', e => {
 });
 addEventListener('keyup', e => { if (R.key && R.ptt && e.code === SET.pttKey) { R.pttDown = false; applyMic(); stateChanged(); } });
 
+// (3.22.1) прежний источник индикатора отключаем — иначе при каждом пересоздании соединения в AudioContext копятся узлы
+const MSRC: Record<string, MediaStreamAudioSourceNode> = {};
+function unmeter(name: string) { try { MSRC[name]?.disconnect(); } catch {} delete MSRC[name]; delete R.meters[name]; }
 function meter(name: string, stream: MediaStream) {
   try {
     R.ac = R.ac || new AudioContext();
+    try { MSRC[name]?.disconnect(); } catch {}
     const src = R.ac.createMediaStreamSource(stream), an = R.ac.createAnalyser();
+    MSRC[name] = src;
     an.fftSize = 512; src.connect(an);
     const buf = new Uint8Array(an.fftSize);
     R.meters[name] = () => { an.getByteTimeDomainData(buf); let m = 0; for (const x of buf) m = Math.max(m, Math.abs(x - 128)); return m; };
@@ -305,7 +313,8 @@ export async function toggleVoice() {
 export function toggleMic() {
   if (R.forced) { R.forced = ''; R.mic = true; R.deaf = false; muteIndicate(''); sfx('unmute'); applyMic(); stateChanged(); return; }
   const wasDeaf = R.deaf;
-  R.mic = !R.mic;
+  // (3.21) звук выключен — микрофон выключен вместе с ним; нажатие на микрофон включает оба
+  R.mic = wasDeaf ? true : !R.mic;
   if (R.mic) R.deaf = false;
   sfx(wasDeaf && R.mic ? 'undeaf' : R.mic ? 'unmute' : 'mute');
   applyMic(); stateChanged();
@@ -321,7 +330,7 @@ function link(n: string) {
   pc.onnegotiationneeded = async () => {
     try { L.making = true; await pc.setLocalDescription(); await rsend(n, { type: 'sdp', pc: L.id, desc: pc.localDescription!.toJSON() }); } catch {} finally { L.making = false; }
   };
-  pc.onicecandidate = e => { if (e.candidate) rsend(n, { type: 'ice', pc: L.id, candidate: e.candidate.toJSON() }).catch(() => {}); };
+  pc.onicecandidate = e => { if (e.candidate) rsend(n, { type: 'ice', pc: L.id, to: L.rid || undefined, candidate: e.candidate.toJSON() }).catch(() => {}); };
   pc.ontrack = e => {
     const s = e.streams[0];
     if (!s) return;
@@ -336,7 +345,11 @@ function link(n: string) {
     if (cs === 'failed' || cs === 'disconnected') L.badSince = L.badSince || Date.now();
     else if (cs === 'connected') L.badSince = 0;
     bump();
-    if (cs === 'failed') { toast('Не удалось соединиться с ' + titleOf(n) + ' — проверьте связь (вкладка «Соседи» → «Проверить»)', 'bad'); try { pc.restartIce(); } catch {} }
+    // чинит сторож heal() ниже; подсказка — один раз за обрыв
+    if (R.pcs[n] !== L) return; // старое соединение (уже заменено)
+    const h = hl(n);
+    if (cs === 'failed' && !h.toldFail) { h.toldFail = true; toast('Связь с ' + titleOf(n) + ' оборвалась — восстанавливаю…', 'warn'); }
+    else if (cs === 'connected') delete HL[n];
   };
   return L;
 }
@@ -349,13 +362,112 @@ setInterval(() => {
       if (L.stuck === 2) { try { pc.restartIce(); } catch {} }
       else if (L.stuck >= 4) { closeLink(n); syncLink(n); }
     } else L.stuck = 0;
+    heal(n, L);
   }
 }, 2000);
+// (3.21.2) самовосстановление голоса. Раньше при обрыве был один restartIce: если его предложение терялось
+// (пока связи нет, сигнал до собеседника не доходит) или ключ TURN в настройках успел устареть (живёт сутки,
+// а брался один раз при старте панели) — собеседника не было слышно до перезахода в канал.
+// Теперь сломанным считается: «failed», «disconnected» дольше 8 с, своё предложение без ответа дольше 10 с,
+// поиск пути дольше 25 с. Шаги по очереди: свежий список ICE + restartIce, затем соединение с нуля, и так далее
+// с паузами 15, 30, 45, 60 с. Начинает сторона, которая при встречных предложениях настаивает на своём
+// (не polite); вторая подхватывает через 6 с — на случай, если у собеседника Мост старее.
+let iceAt = 0, iceP: Promise<void> | null = null;
+// (3.22.1) одновременные вызовы ждут одну и ту же загрузку (раньше второй сразу шёл со старыми ключами TURN)
+async function freshIce(force = false) {
+  if (force || Date.now() - iceAt > 30000) { iceAt = Date.now(); iceP = loadIce().finally(() => { iceP = null; }); }
+  if (iceP) await iceP;
+}
+setInterval(() => { iceAt = Date.now(); loadIce(); }, 30 * 60000);
+/** (3.22.1) Сколько раз и когда чинили связь с собеседником — по имени, а не в соединении: при пересоздании
+ *  соединения паузы 15/30/45/60 с продолжают нарастать, а подсказка «оборвалась» не повторяется. */
+type Heal = { heal: number; healAt: number; brokenSince: number; toldFail: boolean };
+const HL: Record<string, Heal> = {};
+/** Кандидаты, пришедшие, когда нашего соединения нет: берём только те, что от соединения из следующего предложения. */
+const ORPH: Record<string, { pc: string; c: any }[]> = {};
+const hl = (n: string) => (HL[n] = HL[n] || { heal: 0, healAt: 0, brokenSince: 0, toldFail: false });
+function isBroken(L: any, now: number) {
+  const pc: RTCPeerConnection = L.pc, cs = pc.connectionState;
+  if (pc.signalingState === 'have-local-offer') L.offerAt = L.offerAt || now; else L.offerAt = 0;
+  if (cs === 'connected' || cs === 'closed') return false;
+  if (cs === 'failed') return true;
+  if (cs === 'disconnected') return !!L.badSince && now - L.badSince > 8000;
+  if (L.offerAt && now - L.offerAt > 10000) return true;
+  // путь ищется, а не находится (описания есть с обеих сторон)
+  if (pc.localDescription && pc.remoteDescription) { L.seekSince = L.seekSince || now; return now - L.seekSince > 25000; }
+  L.seekSince = 0;
+  return false;
+}
+function heal(n: string, L: any) {
+  const now = Date.now();
+  if (!isBroken(L, now)) {
+    if (L.pc.connectionState === 'connected') { delete HL[n]; L.seekSince = 0; }
+    else if (HL[n] && !HL[n].heal) HL[n].brokenSince = 0; // ещё не чинили и уже не сломано — отсчёт заново
+    return;
+  }
+  if (!R.members.includes(n) || !reachable(n)) return; // соседа нет на связи — сигналы не дойдут; вернётся — начнём сразу
+  const h = hl(n);
+  h.brokenSince = h.brokenSince || now;
+  const due = h.healAt ? h.healAt + Math.min(60000, 15000 * h.heal) : h.brokenSince + (L.polite ? 6000 : 0);
+  if (now < due || L.healing) return;
+  h.heal++; h.healAt = now;
+  if (h.heal % 2 === 1) restartLink(n, L);
+  else rebuildLink(n, L);
+}
+async function restartLink(n: string, L: any) {
+  L.healing = true;
+  try {
+    await freshIce();
+    const pc: RTCPeerConnection = L.pc;
+    if (R.pcs[n] !== L) return;
+    try { pc.setConfiguration(Object.assign(pc.getConfiguration(), { iceServers: RTC_CFG.iceServers, iceTransportPolicy: RTC_CFG.iceTransportPolicy })); } catch {}
+    // своё предложение потерялось — откатить, иначе новое не уйдёт
+    if (pc.signalingState === 'have-local-offer') try { await pc.setLocalDescription({ type: 'rollback' }); } catch {}
+    L.seekSince = 0; L.offerAt = 0;
+    pc.restartIce();
+  } finally { L.healing = false; }
+}
+/** (3.21.2) «Переподключить» из меню плитки: соединение с собеседником создаётся с нуля у обоих.
+ *  Новое предложение делает ровно одна сторона — не-polite (если обе начнут сразу, их новые соединения рвут друг
+ *  друга). Обе получают «relink» (очередь rsend: раньше нового предложения) и закрывают старое; polite ждёт
+ *  предложения. Нечего отправлять не-polite стороне (нет звука и показов) — она просит polite начать ({go: 1}).
+ *  Мост старее 3.21.2 «relink» не знает: если за 4 с предложение не пришло, начинаем сами — новое предложение
+ *  с новым номером и так заставит его начать заново. */
+async function relinkLead(n: string) {
+  // (3.22.1) только что начали заново и ждём ответа — второй «relink» (встречное нажатие) не пересоздаёт ещё раз:
+  // иначе ответ на первое предложение лёг бы на второе соединение
+  const P = R.pcs[n];
+  if (P && P.leadAt && Date.now() - P.leadAt < 3000 && (P.making || P.pc.signalingState === 'have-local-offer')) return true;
+  await freshIce(true);
+  closeLink(n); syncLink(n); bump();
+  if (R.pcs[n]) R.pcs[n].leadAt = Date.now();
+  return !!R.pcs[n];
+}
+export async function relinkPeer(n: string) {
+  if (!R.key || n === ME() || !R.members.includes(n)) return false;
+  const polite = ME() > n, k = R.key;
+  if (polite) closeLink(n); // (3.22.1) сначала закрыть: предложение собеседника может прийти, пока ждём отправки
+  await rsend(n, { type: 'relink' }).catch(() => {});
+  if (!polite) { if (!(await relinkLead(n))) rsend(n, { type: 'relink', go: 1 }).catch(() => {}); return true; }
+  bump();
+  setTimeout(() => { if (R.key === k && R.members.includes(n) && !R.pcs[n]) relinkLead(n); }, 4000);
+  return true;
+}
+async function onRelink(n: string, go: boolean) {
+  if (go || ME() < n) { if (!(await relinkLead(n)) && !go) rsend(n, { type: 'relink', go: 1 }).catch(() => {}); }
+  else { closeLink(n); bump(); }
+}
+// соединение с нуля — как «Переподключить»: новое предлагает одна сторона, иначе новые соединения рвут друг друга
+async function rebuildLink(n: string, L: any) {
+  L.healing = true;
+  try { await relinkPeer(n); } finally { L.healing = false; }
+  if (HL[n]) HL[n].healAt = Date.now(); // пауза до следующего шага — от конца этого
+}
 function closeLink(n: string) {
   const L = R.pcs[n];
   if (!L) return;
   try { L.pc.close(); } catch {}
-  delete R.pcs[n]; delete R.meters[n];
+  delete R.pcs[n]; unmeter(n);
   document.getElementById('ra-' + n)?.remove();
 }
 /** Что отправлять участнику: звук (если голос у обоих) и показы, которые он смотрит. */
@@ -543,6 +655,9 @@ async function onRoom(m: any) {
       if (d === 'join' && m.st && m.st.qj) {} // вошёл тихо
       else if (d === 'join' && Date.now() - (R.joinedAt || 0) > 4000 && playJoinSound(n)) {} else if (d) sfx(d);
     }
+    // собеседник вернулся после обрыва, а наше соединение с ним так и не ожило — чинить сразу, без ожидания
+    // (3.22.1) отсчёт — с этого момента, а не «давно»: иначе polite не ждал своих 6 с и чинили обе стороны сразу
+    if (k === R.key && reconn) { const L = R.pcs[n]; if (L && L.pc.connectionState !== 'connected') { const h = hl(n); h.heal = 0; h.healAt = 0; h.brokenSince = Date.now(); } }
     if (k === R.key) { if (!R.members.includes(n)) R.members.push(n); syncLink(n); if (reconn) { if (Date.now() - (R.joinedAt || 0) > 4000) toast('Связь с ' + titleOf(n) + ' восстановилась'); } else if (isNew) { toast(titleOf(n) + ' зашёл в «' + R.title + '»'); activity('channel.join', { room: k, who: n }); } }
     else if (isNew && !R.key && roomDef(k)) toast(titleOf(n) + ' в канале «' + roomDef(k).title + '» — вкладка «Каналы»');
     bump();
@@ -552,7 +667,7 @@ async function onRoom(m: any) {
     if (ROSTER[k]) delete ROSTER[k][n];
     if (k === R.key) {
       if (!R.deaf) sfx('leave');
-      closeLink(n);
+      closeLink(n); delete HL[n];
       for (const id of Object.keys(R.remote)) if (!R.remote[id].active) delete R.remote[id];
       toast(titleOf(n) + ' вышел');
     }
@@ -589,22 +704,30 @@ async function onRoom(m: any) {
     return;
   }
   if (k !== R.key) return;
+  if (m.type === 'relink') { await onRelink(n, !!m.go); return; }
   if (m.type === 'sdp') {
     // собеседник начал соединение заново (новый номер) — и мы с чистого листа
-    let fresh = false;
+    let fresh = !R.pcs[n]; // соединения не было (или его закрыли перед «relink») — после ответа добавить своё
     if (R.pcs[n] && m.pc && R.pcs[n].rid && R.pcs[n].rid !== m.pc && m.desc.type === 'offer') { closeLink(n); fresh = true; }
+    // (3.22.1) ответ на предложение другого (уже закрытого) нашего соединения — не наш; `to` шлёт Мост ≥ 3.22.1
+    if (m.desc.type === 'answer' && m.to && (!R.pcs[n] || R.pcs[n].id !== m.to)) return;
     const L = link(n), pc = L.pc, desc = m.desc;
     if (m.pc) L.rid = m.pc;
+    if (ORPH[n]) { for (const o of ORPH[n]) if (o.pc === L.rid) L.early.push(o.c); delete ORPH[n]; }
     const collision = desc.type === 'offer' && (L.making || pc.signalingState !== 'stable');
     L.ignore = !L.polite && collision;
     if (L.ignore) return;
     try {
       await pc.setRemoteDescription(desc);
       for (const c of L.early.splice(0)) try { await pc.addIceCandidate(c); } catch {}
-      if (desc.type === 'offer') { await pc.setLocalDescription(); await rsend(n, { type: 'sdp', pc: L.id, desc: pc.localDescription.toJSON() }); if (fresh) syncLink(n); }
+      if (desc.type === 'offer') { await pc.setLocalDescription(); await rsend(n, { type: 'sdp', pc: L.id, to: L.rid, desc: pc.localDescription.toJSON() }); if (fresh) syncLink(n); }
     } catch (e) { console.warn('sdp', e); }
   } else if (m.type === 'ice') {
-    const L = link(n);
+    // (3.22.1) соединения нет (закрыли перед «relink») — кандидат от старого соединения собеседника; новое
+    // соединение пришлёт свои после предложения. Раньше тут создавалось пустое соединение.
+    const L = R.pcs[n];
+    if (!L) { if (m.pc) (ORPH[n] = (ORPH[n] || []).slice(-30)).push({ pc: m.pc, c: m.candidate }); return; }
+    if (m.to && m.to !== L.id) return;
     if (m.pc && L.rid && m.pc !== L.rid) return;
     if (!L.pc.remoteDescription) { L.early.push(m.candidate); return; } // кандидат раньше описания — придержать
     try { await L.pc.addIceCandidate(m.candidate); } catch (e) { if (!L.ignore) console.warn('ice', e); }

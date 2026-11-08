@@ -197,6 +197,7 @@ async fn op_call(srv: &Arc<Srv>, op: &str, args: &Value) -> Result<Value, String
             if op != "restore" {
                 srv.turn.drop_who(&name);
                 srv.net.drop_member(&name);
+                srv.link.drop_member(&name);
             }
             log(&format!("администратор: {} «{}»", match op { "revoke" => "отозван", "restore" => "возвращён", _ => "удалён" }, name));
             Ok(json!(true))
@@ -286,12 +287,14 @@ fn status(srv: &Srv) -> Value {
     let seen = srv.seen.lock().clone();
     let now = chrono::Utc::now().timestamp();
     let online = srv.net.online();
+    let linked = srv.link.online();
+    let link_bytes = srv.link.bytes.lock().clone();
     let members: Vec<Value> = c
         .members
         .iter()
         .map(|m| {
             let u = usage.get(&m.name).copied().unwrap_or_default();
-            json!({ "name": m.name, "enabled": m.enabled, "created": m.created, "up": u.up, "down": u.down, "allocs": u.allocs, "lastSeen": seen.get(&m.name), "vip": m.vip, "net": online.get(&m.name) })
+            json!({ "name": m.name, "enabled": m.enabled, "created": m.created, "up": u.up, "down": u.down, "allocs": u.allocs, "lastSeen": seen.get(&m.name), "vip": m.vip, "net": online.get(&m.name), "link": linked.contains(&m.name), "linkBytes": link_bytes.get(&m.name).copied().unwrap_or(0) })
         })
         .collect();
     let service = if std::path::Path::new("/run/systemd/system").exists() { sh_out("systemctl", &["is-active", SERVICE]).unwrap_or_default().trim().to_string() } else { String::new() };

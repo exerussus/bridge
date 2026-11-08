@@ -74,6 +74,16 @@ async fn gate(State(node): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, req: 
     let ip = Some(canon_ip(addr.ip()));
     let path_str = req.uri().path().to_string();
     let p = API_PREFIX;
+    // (3.20) соединение соседа через свой сервер: только API соседей, адрес не проверяется — только подпись
+    if let Some(t) = req.extensions().get::<crate::tunnel::Tunneled>().cloned() {
+        if path_str == format!("{}/health", p) {
+            return next.run(req).await;
+        }
+        if path_str.starts_with(&format!("{}/peer/", p)) {
+            return peer_gate(node, None, Some(t.0), req, next).await;
+        }
+        return StatusCode::NOT_FOUND.into_response();
+    }
     // Телефон: своя страница и свой ключ (cookie), с любого адреса. Менять что-то — только со своей страницы (заголовок).
     if path_str == "/m" || path_str.starts_with("/m/") {
         if path_str == "/m/" && req.method() == axum::http::Method::GET {
@@ -91,7 +101,7 @@ async fn gate(State(node): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, req: 
     }
     let loopback = is_loopback(ip);
     if path_str.starts_with(&format!("{}/peer/", p)) {
-        return peer_gate(node, ip, req, next).await;
+        return peer_gate(node, ip, None, req, next).await;
     }
     // Остальное — только с 127.0.0.1 или с адресов соседей
     if !loopback && !node.cfg.read().peers.iter().any(|x| x.enabled && x.allows_ip(ip)) {
@@ -145,8 +155,8 @@ async fn gate(State(node): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, req: 
 
 /// Пропуск запроса соседа: подпись → сосед по отпечатку ключа (у узлов до 1.4 — по имени) → включён → подпись верна →
 /// адрес в белом списке (или сосед сам сообщил его в подписанном hello) → дальше. Каждый отказ — с понятной причиной.
-async fn peer_gate(node: Arc<Node>, ip: Option<IpAddr>, req: Request, next: Next) -> Response {
-    let ip_text = ip.map(|i| i.to_string()).unwrap_or_default();
+async fn peer_gate(node: Arc<Node>, ip: Option<IpAddr>, tunneled: Option<String>, req: Request, next: Next) -> Response {
+    let ip_text = if tunneled.is_some() { "свой сервер".to_string() } else { ip.map(|i| i.to_string()).unwrap_or_default() };
     let auth = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     let parsed = auth.strip_prefix(&format!("{} ", AUTH_SCHEME)).and_then(signing::parse);
     let Some(parsed) = parsed else {
@@ -183,7 +193,7 @@ async fn peer_gate(node: Arc<Node>, ip: Option<IpAddr>, req: Request, next: Next
     let path_str = req.uri().path().to_string();
     let query: HashMap<String, String> = req.uri().query().map(parse_query).unwrap_or_default();
     let stream = method == axum::http::Method::PUT && path_str.starts_with(&format!("{}/peer/folders/", API_PREFIX)) && (path_str.ends_with("/file") || path_str.ends_with("/pack"));
-    let ip_known = peer.allows_ip(ip) || (is_loopback(ip) && peer.ips.iter().any(|x| x == "127.0.0.1"));
+    let ip_known = tunneled.is_some() || peer.allows_ip(ip) || (is_loopback(ip) && peer.ips.iter().any(|x| x == "127.0.0.1"));
     let (parts, body) = req.into_parts();
     let mut bytes = Bytes::new();
     let body_sha;
@@ -240,7 +250,13 @@ async fn peer_gate(node: Arc<Node>, ip: Option<IpAddr>, req: Request, next: Next
         s.inbound_error.clear();
         s.inbound_legacy = parsed.kid.is_empty();
     });
-    node.mark_ip(&name, &ip_text);
+    // (3.21) постучался, а у нас «не на связи» (только что запустился) — проверить связь сразу, не ждать круга
+    node.probe_peer(&name);
+    match &tunneled {
+        // пришёл через сервер — запомнить его имя у сервера, чтобы и отсюда звонить ему так же
+        Some(member) => crate::link::learn_relay_member(&node, &name, member, None),
+        None => node.mark_ip(&name, &ip_text),
+    }
     let mut req = Request::from_parts(parts, if stream { pass_body } else { Body::from(bytes.clone()) });
     req.extensions_mut().insert(PeerCtx { name, body: bytes });
     next.run(req).await
@@ -494,6 +510,8 @@ async fn hello(State(node): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, Quer
         you: Some(PeerView { name: pc.name.clone(), online: ps.online, last_seen: ps.last_seen, error: ps.error, url: node.cfg.read().peer(&pc.name).map(|p| p.url.clone()).unwrap_or_default() }),
         revs,
         bulk: node.bulk_wanted(),
+        link: node.tunnel.info(&node),
+        builds: crate::builds::report_for(&node, &pc.name),
         ..Default::default()
     })
 }
@@ -924,6 +942,7 @@ async fn signal(State(node): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, req
     // Браузер прячет свои адреса за «xxxx.local» (mDNS), а через VPN такие имена не находятся.
     // Мост знает настоящий адрес соседа — подставляем его.
     let ip = canon_ip(addr.ip()).to_string();
+    let ip = if addr.ip().is_unspecified() { String::new() } else { ip };
     if let Some(c) = msg.get_mut("candidate").and_then(|c| c.get_mut("candidate")) {
         if let Some(text) = c.as_str() {
             *c = serde_json::Value::String(unmask_candidate(text, &ip));
@@ -998,7 +1017,7 @@ async fn signal(State(node): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, req
 /// «candidate:… 1 udp 2122… abcd-ef.local 54321 typ host» → адрес вместо имени .local.
 pub fn unmask_candidate(line: &str, ip: &str) -> String {
     let mut parts: Vec<String> = line.split(' ').map(String::from).collect();
-    if parts.len() > 5 && parts[4].ends_with(".local") {
+    if parts.len() > 5 && parts[4].ends_with(".local") && !ip.is_empty() {
         parts[4] = ip.to_string();
     }
     parts.join(" ")

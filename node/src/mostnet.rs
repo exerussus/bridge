@@ -45,9 +45,15 @@ pub fn note(node: &Node, svc: &Option<Value>) {
 pub fn schedule(node: &Arc<Node>) {
     let n = node.clone();
     tokio::spawn(async move {
+        let mut tries = 0u32;
         loop {
             let s = status().await;
             note(&n, &s);
+            // (3.22.1) служба могла ещё не подняться после перезагрузки — пробуем первые 2 минуты (7 опросов)
+            if tries < REFRESH_TRIES && n.data_dir.join(crate::update::NET_REFRESH).exists() {
+                tries += 1;
+                refresh_after_update(&n, &s, tries >= REFRESH_TRIES);
+            }
             if s.is_some() {
                 let _ = push(&n).await;
             }
@@ -55,6 +61,37 @@ pub fn schedule(node: &Arc<Node>) {
                 _ = n.shutdown.cancelled() => break,
                 _ = tokio::time::sleep(Duration::from_secs(20)) => {}
             }
+        }
+    });
+}
+
+const REFRESH_TRIES: u32 = 7;
+
+/// (3.21.1) С обновлением моста от соседа пришла новая служба своей сети: если она установлена здесь и старее
+/// пришедшей — переставить (Windows спросит подтверждение администратора; один раз на версию). (3.22.1) Метка
+/// снимается только после ответа службы (или когда она так и не ответила за `REFRESH_TRIES` опросов); установка — в
+/// отдельной задаче: пока окно Windows открыто, сверка настроек со службой идёт своим чередом.
+fn refresh_after_update(node: &Arc<Node>, s: &Option<Value>, last: bool) {
+    let mark = node.data_dir.join(crate::update::NET_REFRESH);
+    let Some(s) = s else {
+        if last {
+            let _ = std::fs::remove_file(&mark);
+            node.info("Своя сеть: служба не отвечает — не обновлена; если она установлена: «Соседи» → «Сеть и сервер» → «Обновить службу»");
+        }
+        return; // ещё не поднялась (или не ставили) — следующий опрос
+    };
+    let want = std::fs::read_to_string(&mark).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).unwrap_or_else(|| bridge_core::APP_VERSION.to_string());
+    let _ = std::fs::remove_file(&mark);
+    let ver = s["version"].as_str().unwrap_or("").to_string();
+    if !ver.is_empty() && crate::update::cmp(&ver, &want) != std::cmp::Ordering::Less {
+        return; // уже такая же или новее — не трогать
+    }
+    let node = node.clone();
+    tokio::spawn(async move {
+        node.info(&format!("Своя сеть: служба {} старше пришедшей {} — обновляю (Windows спросит подтверждение)", if ver.is_empty() { "?" } else { &ver }, want));
+        match install(false).await {
+            Ok(t) => node.info(&format!("Своя сеть: служба обновлена — {}", t)),
+            Err(e) => node.info(&format!("Своя сеть: службу не обновить ({}) — «Соседи» → «Сеть и сервер» → «Обновить службу»", e)),
         }
     });
 }

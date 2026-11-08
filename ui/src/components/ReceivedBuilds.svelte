@@ -4,16 +4,31 @@
   import { api } from '../lib/api';
   import { ago, size, fullTime } from '../lib/util';
   import Gi from './Gi.svelte';
-  let { B, reload }: { B: any; reload: () => void } = $props();
+  import { runKey } from '../lib/buildsync';
+  let { B, reload, onpreset }: { B: any; reload: () => any; onpreset?: (id: string) => void } = $props();
+  // (3.22) общая сборка: подхватить — своя заготовка с тем же GUID, папка — где проект собирается у вас
+  let adoptOf = $state(''), adoptPath = $state(''), adoptBusy = $state(false);
+  async function adopt(r: any) {
+    adoptBusy = true;
+    try {
+      const x = await api('POST', 'builds/adopt', { gid: r.gid, path: adoptPath.trim() });
+      toast('Теперь «' + r.name + '» патчите и вы — номера общие с ' + peerTitle(r.peer), 'ok');
+      adoptOf = ''; adoptPath = '';
+      // (3.22.1) сначала заготовка должна появиться в списке — иначе подробности на миг пропадают
+      try { await reload(); } catch {}
+      onpreset?.(x.id);
+    } catch (e: any) { toast(e.message, 'bad'); }
+    adoptBusy = false;
+  }
   let busy = $state('');
   let open = $state<Record<string, boolean>>({});
   const key = (r: any) => r.peer + '/' + r.name;
 
   async function run(r: any) {
-    const k = key(r) + '|' + r.exe;
+    const k = runKey(r);
     const ok = (SET.buildRunOk || []) as string[];
     if (!ok.includes(k)) {
-      if (!confirm('Запустить «' + r.exe + '» из сборки «' + r.name + '» от ' + peerTitle(r.peer) + '?\n\nЭто программа с другого ПК: она получит те же возможности, что любая программа на вашем компьютере. Запускайте, если доверяете отправителю.')) return;
+      if (!confirm('Запустить «' + r.exe + '» из сборки «' + r.name + '» от ' + peerTitle(r.peer) + (r.gid && r.by && r.by !== r.peer ? ' (эту версию выпустил ' + peerTitle(r.by) + ')' : '') + '?\n\nЭто программа с другого ПК: она получит те же возможности, что любая программа на вашем компьютере. Запускайте, если доверяете отправителю.')) return;
       setSet('buildRunOk', [...ok, k].slice(-100));
     }
     busy = key(r);
@@ -61,8 +76,19 @@
         <button class="b sm" onclick={() => openDir(r)}><Gi n="folder" /> Папка</button>
         <button class="b sm" onclick={() => setTarget(r)}>Куда…</button>
         <button class="b sm" title="Какую программу запускать кнопкой «▶ Запустить» — запоминается" onclick={() => setExe(r)}>Что запускать…</button>
+        {#if r.gid}
+          {#if r.preset}<button class="b sm rbpatch" title="Эту сборку вы уже патчите — открыть свою заготовку" onclick={() => onpreset?.(r.preset)}>Моя заготовка</button>
+          {:else}<button class="b sm rbpatch" disabled={!r.canPatch} title={r.canPatch ? 'Выпускать версии этой сборки и с этого ПК: у получателей она останется одной, номера пойдут подряд' : peerTitle(r.owner || r.peer) + ' не добавил вас в соавторы — попросите его («Команда» в его сборке)'} onclick={() => { adoptOf = adoptOf === key(r) ? '' : key(r); }}>Патчить эту сборку</button>{/if}
+        {/if}
       </div>
     </div>
+    {#if r.gid}<div class="small muted" style="margin-top:4px">Общая сборка · автор {peerTitle(r.owner || r.peer)}{(r.authors || []).length ? ' · соавторы: ' + r.authors.map(peerTitle).join(', ') : ''}{r.by && r.by !== r.peer ? ' · эту версию выпустил ' + peerTitle(r.by) : ''}</div>{/if}
+    {#if adoptOf === key(r)}
+      <div class="rbad">
+        <div class="small">Где эта сборка получается у вас — папка, куда собирается проект (её содержимое и будет уходить получателям). Получатели и «Не паковать» возьмутся из сборки.</div>
+        <div class="row" style="gap:8px;margin-top:8px"><input class="mono grow" placeholder="D:\Проекты\Игра\Build" bind:value={adoptPath} aria-label="Папка сборки на этом ПК" /><button class="b pri" disabled={adoptBusy || !adoptPath.trim()} onclick={() => adopt(r)}>Патчить отсюда</button><button class="b sm" onclick={() => (adoptOf = '')}>Отмена</button></div>
+      </div>
+    {/if}
     {#if L.note}<div class="rbnote"><span class="plbl" style="margin:0">Что нового</span><div>{L.note}</div></div>{/if}
     {#if r.error}<div class="small" style="color:var(--warn);margin-top:6px">Последняя присланная не распаковалась: {r.error}</div>{/if}
     <div class="small muted mono rbt">{r.target}{r.exe ? ' · запуск: ' + r.exe + (r.exeOwn ? ' (своё)' : '') : ''}</div>
@@ -95,7 +121,9 @@
   .rbrun { width: 210px; display: inline-flex; gap: 8px; align-items: center; justify-content: flex-end; }
   .rbnote { margin-top: 10px; padding: 8px 10px; border-radius: 10px; background: var(--panel2); white-space: pre-wrap; display: flex; flex-direction: column; gap: 4px; }
   .rbt { margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rbad { margin-top: 10px; padding: 12px 14px; border-radius: 12px; background: var(--accent-soft); border: 1px solid rgba(56, 225, 240, 0.18); }
   .rbh2 { margin-top: 6px; }
+  .rbpatch { min-width: 172px; }
   .rbhn { white-space: pre-wrap; color: var(--muted, #A3A7CC); padding: 2px 0 0 4px; }
   .brow { padding: 6px 0; border-top: 1px solid var(--line); }
 </style>

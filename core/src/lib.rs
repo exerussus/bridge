@@ -15,6 +15,7 @@ pub mod scanner;
 pub mod schemas;
 pub mod signing;
 pub mod time;
+pub mod tunnel;
 
 pub use proto::*;
 

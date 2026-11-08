@@ -38,6 +38,7 @@ pub mod stickers;
 pub mod tailscale;
 pub mod tile;
 pub mod tools;
+pub mod tunnel;
 pub mod turn;
 pub mod update;
 pub mod watch;

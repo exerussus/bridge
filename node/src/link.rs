@@ -376,6 +376,8 @@ pub fn rename_refs(node: &Node, cfg: &mut NodeConfig, from: &str, to: &str) {
         }
     }
     node.folders.forget_peer(node, from);
+    // (3.22.1) сборки: заготовки, реестр общих, история, папки
+    crate::builds::rename_peer(node, from, to);
     // Очередь отправки по прежнему имени — в папку нового
     let out_root = node.mailbox.outgoing_root(node, cfg);
     let (old, new) = (out_root.join(from), out_root.join(to));
@@ -527,7 +529,91 @@ pub async fn connect_peer(node: &Arc<Node>, address: &str, secret: &str, title: 
 }
 
 /// Пригласить: создать ключ и ждать, когда сосед подключится по адресу этого ПК и ключу.
+/// (3.21.1) Свои адреса для приглашения: все сети ПК с подписью, лучший — первым.
+/// Порядок: Radmin, своя сеть (10.77), Tailscale, внешний, локальная сеть (192.168…) — к ней из другой сети не подключиться.
+/// `listening` — мост действительно принимает соединения на этом адресе.
+pub fn invite_addresses(node: &Node) -> Vec<serde_json::Value> {
+    let ann: Vec<String> = node.announce_urls().iter().map(|u| u.trim_start_matches("http://").to_string()).collect();
+    let port = ann.first().and_then(|a| a.rsplit_once(':')).and_then(|(_, p)| p.parse::<u16>().ok())
+        .or_else(|| node.cfg.read().listen.iter().filter_map(|l| config::parse_listen(l)).map(|(_, p)| p).find(|p| *p != 0))
+        .unwrap_or(5390);
+    let any = node.cfg.read().listen.iter().filter_map(|l| config::parse_listen(l)).any(|(ip, _)| ip.is_unspecified());
+    let ifs = crate::http_peer::interface_ips();
+    let mut list: Vec<(u8, String, &'static str, bool)> = Vec::new();
+    let mut add = |hp: String, listening: bool| {
+        if list.iter().any(|x| x.1 == hp) {
+            return;
+        }
+        let ip = hp.rsplit_once(':').map(|x| x.0).unwrap_or(&hp);
+        let ifname = ifs.iter().find(|(a, _)| a.to_string() == ip).map(|(_, n)| n.as_str());
+        let (rank, kind) = addr_kind_on(ip, ifname);
+        list.push((rank + if listening { 0 } else { 10 }, hp, kind, listening));
+    };
+    for a in &ann {
+        add(a.clone(), true);
+    }
+    for (ip, _) in ifs.clone() {
+        let hp = format!("{}:{}", ip, port);
+        let l = any || ann.contains(&hp) || node.bound.lock().contains(&ip);
+        add(hp, l);
+    }
+    list.sort_by_key(|x| x.0);
+    list.into_iter().map(|(_, a, k, l)| serde_json::json!({ "addr": a, "kind": k, "listening": l })).collect()
+}
+
+/// (3.22.1) То же, с учётом сети, на которой адрес: 100.64.0.0/10 — Tailscale только на его адаптере; на другом это
+/// общий адрес провайдера (CGNAT), снаружи по нему не подключиться.
+pub fn addr_kind_on(ip: &str, ifname: Option<&str>) -> (u8, &'static str) {
+    let k = addr_kind(ip);
+    match ifname {
+        Some(n) if k.0 == 2 && !n.to_lowercase().contains("tailscale") => (6, "адрес провайдера (CGNAT)"),
+        _ => k,
+    }
+}
+
+/// Что за адрес: ранг для «лучший первым» и подпись.
+pub fn addr_kind(ip: &str) -> (u8, &'static str) {
+    let o: Vec<u8> = ip.split('.').filter_map(|x| x.parse().ok()).collect();
+    if o.len() != 4 {
+        return (5, "адрес");
+    }
+    match (o[0], o[1]) {
+        (26, _) => (0, "Radmin"),
+        (10, 77) => (1, "своя сеть"),
+        (100, b) if (64..128).contains(&b) => (2, "Tailscale"),
+        (127, _) => (9, "этот ПК"),
+        (10, _) | (192, 168) => (4, "локальная сеть"),
+        (172, b) if (16..32).contains(&b) => (4, "локальная сеть"),
+        _ => (3, "внешний"),
+    }
+}
+
+/// Адрес для строки приглашения: «ip» или «ip:порт» (порт — как у моста). Пусто — лучший из своих.
+pub fn invite_address(node: &Node, want: &str) -> Result<Option<String>, String> {
+    let w = want.trim().trim_start_matches("http://").trim_end_matches('/');
+    if w.is_empty() {
+        return Ok(None);
+    }
+    let (host, port) = match w.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse::<u16>().map_err(|_| format!("порт «{}» — число", p))?),
+        None => {
+            let def = invite_addresses(node).first().and_then(|a| a["addr"].as_str().and_then(|s| s.rsplit_once(':')).and_then(|(_, p)| p.parse::<u16>().ok())).unwrap_or(5390);
+            (w.to_string(), def)
+        }
+    };
+    let ip: std::net::Ipv4Addr = host.parse().map_err(|_| format!("«{}» — не IPv4-адрес (например 26.12.34.56)", host))?;
+    if ip.is_unspecified() || port == 0 {
+        return Err("нужен настоящий адрес и порт".into());
+    }
+    Ok(Some(format!("{}:{}", ip, port)))
+}
+
 pub fn invite(node: &Arc<Node>, title: &str) -> (InviteResult, String) {
+    invite_at(node, title, None)
+}
+
+/// (3.21.1) Приглашение с выбранным адресом этого ПК (`addr` — «ip:порт», уже проверенный `invite_address`).
+pub fn invite_at(node: &Arc<Node>, title: &str, addr: Option<String>) -> (InviteResult, String) {
     let secret = NodeConfig::new_secret();
     let name = PeerConfig::temp_name(&secret);
     {
@@ -536,7 +622,11 @@ pub fn invite(node: &Arc<Node>, title: &str) -> (InviteResult, String) {
         node.peers.lock().insert(name.clone(), PeerState { name: name.clone(), error: WAITING_INVITE.into(), ..Default::default() });
     }
     let err = node.save_config();
-    let addrs: Vec<String> = node.announce_urls().iter().map(|u| u.trim_start_matches("http://").to_string()).collect();
+    let mut addrs: Vec<String> = invite_addresses(node).iter().filter(|a| a["listening"] == true).filter_map(|a| a["addr"].as_str().map(String::from)).collect();
+    if let Some(a) = addr {
+        addrs.retain(|x| *x != a);
+        addrs.insert(0, a);
+    }
     node.info(&format!(
         "Панель/API: приглашение «{}»{} — ждём подключения",
         name,
@@ -562,33 +652,82 @@ pub async fn contact(node: &Arc<Node>, peer: &PeerConfig) -> Option<HelloRespons
     let kid = peer.key_id();
     // сосед мог переименоваться (назваться) во время запроса — состояние пишем под его нынешним именем
     let current = |node: &Arc<Node>| node.cfg.read().peer_by_key(&kid).map(|p| p.name.clone()).unwrap_or_else(|| peer.name.clone());
-    let t0 = std::time::Instant::now();
     let in_use = node.peer_url(peer);
     let mut res: Option<Result<HelloResponse, PeerError>> = None;
+    // время ответа — только удачной попытки (не вместе с ожиданием неответивших адресов)
+    let mut rtt: Option<Duration> = None;
+    // (3.20.1) на каждую попытку — свой предел: всё вместе укладывается в общий предел опроса
+    async fn timed(c: crate::client::PeerClient, secs: u64) -> (Result<HelloResponse, PeerError>, Duration) {
+        let t = std::time::Instant::now();
+        let r = match tokio::time::timeout(Duration::from_secs(secs), c.hello()).await {
+            Ok(r) => r,
+            Err(_) => Err(PeerError::Net(NetKind::Timeout, format!("не ответил за {} с", secs))),
+        };
+        (r, t.elapsed())
+    }
     // работаем через запасной адрес — раз в 2 минуты проверить, не ожил ли основной
     if in_use != peer.url && node.primary_due(&peer.name) {
-        if let Ok(h) = node.client_at(peer, &peer.url).hello().await {
+        if let (Ok(h), d) = timed(node.client_at(peer, &peer.url), 4).await {
             node.set_peer_url(&peer.name, None);
             node.info(&format!("Связь с «{}» — снова по основному адресу {}", peer.name, peer.url.trim_start_matches("http://")));
             client = node.client_for(peer);
             res = Some(Ok(h));
+            rtt = Some(d);
         }
     }
     let mut res = match res {
         Some(r) => r,
-        None => client.hello().await,
+        None => {
+            let t = std::time::Instant::now();
+            let r = match tokio::time::timeout(Duration::from_secs(6), client.hello()).await {
+                Ok(r) => r,
+                Err(_) => Err(PeerError::Net(NetKind::Timeout, "не ответил за 6 с".into())),
+            };
+            if r.is_ok() {
+                rtt = Some(t.elapsed());
+            }
+            r
+        }
     };
-    // адрес не отвечает — попробовать другие адреса соседа (запасной из настроек, его адреса в своей сети)
+    // адрес не отвечает — все остальные адреса соседа сразу (запасной, его адреса в своей сети, свой сервер):
+    // кто первым ответил, через того и работаем
+    let mut tried: Vec<String> = Vec::new();
     if matches!(res, Err(PeerError::Net(..))) {
         let urls = node.peer_urls(peer);
         let cur = node.peer_url(peer);
-        for u in urls.into_iter().filter(|u| *u != cur) {
-            if let Ok(h) = node.client_at(peer, &u).hello().await {
-                node.set_peer_url(&peer.name, if u == peer.url { None } else { Some(u.clone()) });
-                node.info(&format!("Связь с «{}» — через {} адрес {}", peer.name, if u == peer.url { "основной" } else { "запасной" }, u.trim_start_matches("http://")));
-                client = node.client_for(peer);
-                res = Ok(h);
-                break;
+        if let Err(e) = &res {
+            tried.push(format!("{} — {}", cur.trim_start_matches("http://"), short_err(e)));
+        }
+        let mut all: futures_util::stream::FuturesUnordered<_> = urls
+            .into_iter()
+            .filter(|u| *u != cur)
+            .map(|u| {
+                let c = node.client_at(peer, &u);
+                async move {
+                    let (r, d) = timed(c, 7).await;
+                    (u, r, d)
+                }
+            })
+            .collect();
+        use futures_util::StreamExt;
+        while let Some((u, r, d)) = all.next().await {
+            match r {
+                Ok(h) => {
+                    node.set_peer_url(&peer.name, if u == peer.url { None } else { Some(u.clone()) });
+                    if node.tunnel.is_tunnel_url(&u) {
+                        node.info(&format!("Связь с «{}» — через свой сервер (другие адреса не отвечают)", peer.name));
+                    } else {
+                        node.info(&format!("Связь с «{}» — через {} адрес {}", peer.name, if u == peer.url { "основной" } else { "запасной" }, u.trim_start_matches("http://")));
+                    }
+                    client = node.client_for(peer);
+                    res = Ok(h);
+                    rtt = Some(d);
+                    break;
+                }
+                Err(e) => {
+                    let label = if node.tunnel.is_tunnel_url(&u) { "свой сервер".to_string() } else { u.trim_start_matches("http://").to_string() };
+                    tried.push(format!("{} — {}", label, short_err(&e)));
+                }
             }
         }
     }
@@ -596,8 +735,15 @@ pub async fn contact(node: &Arc<Node>, peer: &PeerConfig) -> Option<HelloRespons
     let (via, via_main) = {
         let u = node.peer_url(peer);
         let main = u.trim_end_matches('/') == peer.url.trim_end_matches('/');
-        (u.trim_start_matches("http://").trim_end_matches('/').to_string(), main)
+        // (3.20) через свой сервер — так и показываем, без служебного адреса 127.0.0.1
+        let shown = if node.tunnel.is_tunnel_url(&u) { "сервер".to_string() } else { u.trim_start_matches("http://").trim_end_matches('/').to_string() };
+        (shown, main)
     };
+    if let Ok(h) = &res {
+        if let Some(l) = &h.link {
+            learn_relay_member(node, &current(node), &l.member, Some(&l.server));
+        }
+    }
     if let Ok(h) = &res {
         let want = h.bulk;
         node.with_peer_state(&current(node), |s| s.wants_bulk = want);
@@ -614,7 +760,7 @@ pub async fn contact(node: &Arc<Node>, peer: &PeerConfig) -> Option<HelloRespons
             let before = node.peer_state(&name);
             let was_online = before.online;
             node.with_peer_state(&name, |s| {
-                s.latency_ms = Some(t0.elapsed().as_millis() as i64);
+                s.latency_ms = rtt.map(|d| d.as_millis() as i64);
                 s.online = true;
                 s.last_seen = Some(time::now());
                 s.status = hello.status.clone();
@@ -635,12 +781,14 @@ pub async fn contact(node: &Arc<Node>, peer: &PeerConfig) -> Option<HelloRespons
                 s.ping = hello.ping.clone();
                 s.tile = hello.tile.clone();
                 s.shares = hello.shares.clone();
+                s.builds = hello.builds.clone();
                 s.error.clear();
                 s.hint.clear();
                 s.last_error.clear();
             });
             if !was_online {
                 node.emit("peer-online", serde_json::json!({ "peer": name }));
+                node.on_peer_online(&name);
             }
             // сосед сменил аватарку, плитку или звуки — открытые панели перечитают отпечатки сразу
             if before.avatar != hello.avatar || before.tile != hello.tile || before.sound != hello.sound || before.ping != hello.ping {
@@ -669,6 +817,9 @@ pub async fn contact(node: &Arc<Node>, peer: &PeerConfig) -> Option<HelloRespons
                     );
                 }
             }
+            if tried.len() > 1 {
+                hint = format!("Пробовал все адреса: {}. {}", tried.join("; "), hint);
+            }
             let (was_online, last) = node.with_peer_state(&name, |s| {
                 let r = (s.online, s.last_error.clone());
                 s.online = false;
@@ -688,13 +839,52 @@ pub async fn contact(node: &Arc<Node>, peer: &PeerConfig) -> Option<HelloRespons
     }
 }
 
+/// (3.20) Сосед — участник своего сервера под таким именем: из его привета (`server` — его сервер) или из звонка
+/// через наш сервер (`server` = None — значит, тот же, что у нас). Запоминается в настройках: связь через сервер
+/// нужна как раз тогда, когда иначе до соседа не достучаться.
+pub fn learn_relay_member(node: &Arc<Node>, peer_name: &str, member: &str, server: Option<&str>) {
+    if member.is_empty() {
+        return;
+    }
+    let server = server.map(String::from).unwrap_or_else(|| node.cfg.read().relay.server.clone());
+    let changed = {
+        let _g = node.config_lock.lock();
+        let mut cfg = node.cfg.write();
+        let Some(p) = cfg.peer_mut(peer_name) else { return };
+        if p.relay_member == member && p.relay_host == server {
+            false
+        } else {
+            p.relay_member = member.to_string();
+            p.relay_host = server.clone();
+            true
+        }
+    };
+    if changed {
+        let err = node.save_config();
+        node.info(&format!("Сосед «{}»: на своём сервере он — «{}» ({}){}", peer_name, member, server, err.map(|e| format!(" (не сохранено: {})", e)).unwrap_or_default()));
+    }
+}
+
+/// Коротко, почему адрес не ответил (для подсказки у соседа).
+fn short_err(e: &PeerError) -> String {
+    match e {
+        PeerError::Net(NetKind::Refused, _) => "отказ в соединении (мост там не слушает этот адрес)".into(),
+        PeerError::Net(NetKind::Timeout, _) => "не отвечает (выключен, нет пути или закрыл брандмауэр)".into(),
+        PeerError::Net(NetKind::Unreachable, _) => "нет пути до адреса".into(),
+        PeerError::Net(NetKind::Reset, _) => "соединение сброшено".into(),
+        PeerError::Net(NetKind::Other, t) => t.lines().next().unwrap_or("").chars().take(80).collect(),
+        PeerError::Http(code, _) => format!("ответил отказом ({})", code),
+        PeerError::Io(t) => t.chars().take(80).collect(),
+    }
+}
+
 /// Привет всем включённым соседям (параллельно).
 pub async fn contact_all(node: &Arc<Node>) {
     let peers: Vec<PeerConfig> = node.cfg.read().peers.iter().filter(|p| p.enabled).cloned().collect();
     let tasks = peers.into_iter().map(|p| {
         let node = node.clone();
         async move {
-            if tokio::time::timeout(Duration::from_secs(15), contact(&node, &p)).await.is_err() {
+            if tokio::time::timeout(Duration::from_secs(20), contact(&node, &p)).await.is_err() {
                 node.with_peer_state(&p.name, |s| {
                     s.online = false;
                     let (e, h) = explain_timeout(&p);

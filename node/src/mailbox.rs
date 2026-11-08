@@ -244,8 +244,11 @@ impl Mailbox {
         let in_root = node.resolve(&cfg.mailbox.incoming);
         let ig = cfg.global_ignore();
         for peer in cfg.peers.iter().filter(|p| p.enabled && p.has_url() && cfg.mailbox.accepts(&p.name)) {
-            if !node.peer_state(&peer.name).online && node.peer_state(&peer.name).last_seen.is_some() {
-                continue; // сосед недоступен — не стучимся лишний раз
+            // (3.21) только у тех, кто на связи: связь проверяется в фоне, а появившийся сосед будит обмен сам —
+            // так молчащий сосед не задерживает отправку от того, кто уже ответил
+            let ps = node.peer_state(&peer.name);
+            if !ps.online {
+                continue;
             }
             let client = node.client_for(peer);
             let list = match client.mailbox_list().await {

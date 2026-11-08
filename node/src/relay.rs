@@ -48,6 +48,8 @@ pub struct RelayStatus {
     pub files_allowed: bool,
     /// Ограничение скорости своей сети на участника, Мбит/с (0 — нет).
     pub net_mbit: u32,
+    /// Сервер умеет связь мостов через себя (3.20+).
+    pub links: Option<bool>,
 }
 
 #[derive(Default)]
@@ -173,6 +175,7 @@ pub async fn check(node: &Arc<Node>) -> RelayStatus {
             st.expires = chrono::Utc::now().timestamp() + h.ttl as i64;
             st.files_allowed = h.files.unwrap_or(true);
             st.net_mbit = h.net_mbit;
+            st.links = h.links;
             *node.relay.info.lock() = Some(RelayInfo::from_hello(&h));
             *node.relay.for_invite.lock() = ident(&cfg);
         }
@@ -192,6 +195,7 @@ pub async fn check(node: &Arc<Node>) -> RelayStatus {
                 st.rtt = old.rtt;
                 st.files_allowed = old.files_allowed;
                 st.net_mbit = old.net_mbit;
+                st.links = old.links;
             } else {
                 *node.relay.info.lock() = None;
             }

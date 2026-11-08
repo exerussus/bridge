@@ -55,6 +55,9 @@ export const ui = $state({
   agentThread: '' as string,
   /** Кто заглушил мой микрофон (пусто — никто). */
   forcedBy: '' as string,
+  /** (3.21) «Соседи»: подвкладка (list | net | pc | str) и раскрытый сосед. */
+  peersSub: 'list' as string,
+  peerOpen: '' as string,
 });
 
 let toastId = 0;
