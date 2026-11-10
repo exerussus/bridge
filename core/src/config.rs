@@ -113,6 +113,38 @@ pub struct AgentConfig {
     pub exchange: String,
     /// Файловый канал efc/1 «канал-агента» рядом с мостом: инструменты bridge mcp для агента без сети (VM).
     pub file_channel: bool,
+    /// (3.24) Чем исполнять поручения: «claude» | «codex».
+    pub engine: String,
+    /// (3.24) Путь к codex.exe / codex.cmd. Пусто — найти самому.
+    pub codex: String,
+    /// (3.24) Песочница Codex: read-only | workspace-write | danger-full-access.
+    pub codex_sandbox: String,
+    /// (3.24) Сеть для команд Codex (генерации картинок она не нужна).
+    pub codex_network: bool,
+    /// (3.24) Модель Codex; пусто — по его настройке.
+    pub codex_model: String,
+    /// (3.24) Папки, куда Codex может писать кроме рабочей и обменной (--add-dir).
+    pub codex_dirs: Vec<String>,
+}
+
+impl AgentConfig {
+    /// Движок исполнителя: «codex» или «claude» (по умолчанию и для неизвестного значения).
+    pub fn engine(&self) -> &'static str {
+        if self.engine.trim().eq_ignore_ascii_case("codex") {
+            "codex"
+        } else {
+            "claude"
+        }
+    }
+
+    /// Песочница Codex с проверкой значения.
+    pub fn codex_sandbox(&self) -> &'static str {
+        match self.codex_sandbox.trim() {
+            "read-only" => "read-only",
+            "danger-full-access" => "danger-full-access",
+            _ => "workspace-write",
+        }
+    }
 }
 
 impl Default for AgentConfig {
@@ -129,6 +161,12 @@ impl Default for AgentConfig {
             extra_args: Vec::new(),
             exchange: String::new(),
             file_channel: false,
+            engine: "claude".into(),
+            codex: String::new(),
+            codex_sandbox: "workspace-write".into(),
+            codex_network: false,
+            codex_model: String::new(),
+            codex_dirs: Vec::new(),
         }
     }
 }

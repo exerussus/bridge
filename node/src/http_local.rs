@@ -179,6 +179,8 @@ pub fn routes() -> Router<Arc<Node>> {
         .route(&l("agent/request/wait"), get(agent_request_wait))
         .route(&l("agent/answer"), post(agent_answer))
         .route(&l("agent/exchange"), post(agent_exchange))
+        .route(&l("agent/codex-check"), get(agent_codex_check))
+        .route(&l("agent/image"), get(agent_image))
         .route(&l("channels"), get(channels_get).post(channels_set))
         .route(&l("shares"), post(shares_set))
         .route(&l("shares/remove"), post(shares_remove))
@@ -2038,7 +2040,7 @@ async fn api_index() -> Response {
             "GET channels", "POST channels {id, title, members:[сосед|@группа|*]}", "POST channels/remove?id", "GET media/presence — кто в каком канале и что делает",
             "GET relay — свой сервер-ретранслятор (most-relay); POST relay {invite?: строка с сервера (5 минут, один раз) | \"\" — отключить, mode?: auto|always|off, share?}; POST relay/check", "GET mostnet — своя локальная сеть (служба most-net, адрес 10.77.x.y, соседи); POST mostnet {enabled}; POST mostnet/install | mostnet/uninstall (Windows, подтверждение администратора)",
             "GET transfers — идущие передачи (процент, скорость, осталось)", "POST folders/settings?upMbit&downMbit&maxFileMb&trashMinutes",
-            "POST mailbox/send {peer, path, dest?}", "GET changelog", "GET agent", "POST agent/ask {peer, prompt, thread?}", "GET agent/wait?id&after&timeout", "POST agent/stop?id", "POST agent/request {thread, question, buttons?, input?}", "GET agent/request/wait?thread&id&timeout", "POST agent/answer {thread, req, answer}",
+            "POST mailbox/send {peer, path, dest?}", "GET changelog", "GET agent", "POST agent/ask {peer, prompt, thread?, images?}", "GET agent/codex-check", "GET agent/wait?id&after&timeout", "POST agent/stop?id", "POST agent/request {thread, question, buttons?, input?}", "GET agent/request/wait?thread&id&timeout", "POST agent/answer {thread, req, answer}",
             "POST sync[?peer] (3.21: ?peer — с одним соседем, «Отправить сейчас»)", "GET log?lines", "POST media/signal {to, type, room, …}", "GET media/stream (SSE)", "POST open?target",
             "GET chat — беседы", "GET chat/messages?conv&after&timeout", "POST chat/send {conv | to | channel, text, author?}", "POST chat/read?conv",
             "GET devices — телефоны", "POST devices/pair {rights?} — код и QR для подключения", "POST devices {id, name?, rights?}", "POST devices/remove?id",
@@ -2235,7 +2237,7 @@ async fn agent_get(State(node): St) -> Response {
         .filter(|p| p.enabled && !p.pending)
         .map(|p| {
             let s = node.peer_state(&p.name);
-            json!({ "name": p.name, "title": p.title, "online": s.online, "agent": s.agent, "mayAsk": cfg.agent_allows(&p.name) })
+            json!({ "name": p.name, "title": p.title, "online": s.online, "agent": s.agent, "engine": if s.agent.is_empty() { "" } else if s.agent_engine.is_empty() { "claude" } else { s.agent_engine.as_str() }, "mayAsk": cfg.agent_allows(&p.name) })
         })
         .collect();
     let exchange = if cfg.agent.exchange.is_empty() {
@@ -2244,10 +2246,42 @@ async fn agent_get(State(node): St) -> Response {
         cfg.folder(&cfg.agent.exchange).map(|f| json!({ "id": f.id, "path": node.folders.own_root(&node, f), "access": f.access })).unwrap_or(Value::Null)
     };
     ok_json(&json!({
-        "settings": cfg.agent, "claude": crate::agent::find_claude(&node).map(|p| p.display().to_string()), "workDir": crate::agent::work_dir(&node),
+        "settings": cfg.agent, "claude": crate::agent::find_claude(&node).map(|p| p.display().to_string()), "codex": crate::agent::find_codex(&node).map(|p| p.display().to_string()), "workDir": crate::agent::work_dir(&node),
         "exchange": exchange, "peers": peers, "threads": node.agent.list(), "mcp": mcp_hint(&node), "fileChannel": node.efc.agent_view(&node),
-        "local": { "name": node.node_name(), "mode": cfg.agent.mode },
+        "local": { "name": node.node_name(), "mode": cfg.agent.mode, "engine": cfg.agent.engine() },
     }))
+}
+
+/// (3.24) Картинка нити для превью: только из списка картинок нити (обменная папка; полный путь — только у исполнителя).
+async fn agent_image(State(node): St, Query(m): Q) -> Response {
+    let Some(t) = node.agent.get(q(&m, "id")) else { return err(404, "нет такой нити") };
+    let Some(im) = q(&m, "n").parse::<usize>().ok().and_then(|n| t.images.get(n)) else { return err(404, "нет такой картинки") };
+    let full = if std::path::Path::new(&im.path).is_absolute() {
+        if t.role != "in" {
+            return err(404, "картинка только на исполнителе");
+        }
+        PathBuf::from(&im.path)
+    } else {
+        let Some(ex) = crate::agent::exchange_path(&node, &t) else { return err(404, "нет обменной папки") };
+        let Some(p) = path::norm(&im.path) else { return err(404, "путь") };
+        let Ok(f) = path::to_local(&ex, &p) else { return err(404, "путь") };
+        f
+    };
+    match tokio::fs::read(&full).await {
+        Ok(b) => {
+            let mut r = Response::new(Body::from(b));
+            let ct = if im.path.to_lowercase().ends_with(".png") { "image/png" } else if im.path.to_lowercase().ends_with(".webp") { "image/webp" } else { "image/jpeg" };
+            r.headers_mut().insert("Content-Type", HeaderValue::from_static(ct));
+            r.headers_mut().insert("Cache-Control", HeaderValue::from_static("no-store"));
+            r
+        }
+        Err(_) => err(404, "файла ещё нет (досинхронизируется)"),
+    }
+}
+
+/// (3.24) Найден ли Codex, версия, вошёл ли (для кнопки «Проверить Codex»).
+async fn agent_codex_check(State(node): St) -> Response {
+    ok_json(&crate::agent::codex_check(&node).await)
 }
 
 async fn agent_settings(State(node): St, body: axum::body::Bytes) -> Response {
@@ -2276,7 +2310,7 @@ async fn agent_settings(State(node): St, body: axum::body::Bytes) -> Response {
     }
     let e = node.save_config();
     let a = node.cfg.read().agent.clone();
-    node.info(&format!("Панель: агент — {}{}", match a.mode.as_str() { "auto" => "сам запускает Claude", "manual" => "поручения ждут сессию Claude", _ => "выключен" }, if a.allow_from.is_empty() { String::new() } else { format!(", поручать могут: {}", a.allow_from.join(", ")) }));
+    node.info(&format!("Панель: агент — {}{}", match a.mode.as_str() { "auto" if a.engine() == "codex" => "сам запускает Codex", "auto" => "сам запускает Claude", "manual" => "поручения ждут сессию Claude", _ => "выключен" }, if a.allow_from.is_empty() { String::new() } else { format!(", поручать могут: {}", a.allow_from.join(", ")) }));
     crate::agent::schedule(&node);
     node.request_sync();
     ok_json(&json!({ "ok": true, "saved": e.is_none(), "error": e }))
@@ -2285,7 +2319,11 @@ async fn agent_settings(State(node): St, body: axum::body::Bytes) -> Response {
 async fn agent_ask(State(node): St, Json(v): Json<Value>) -> Response {
     let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(String::from);
     let peer = s("peer").unwrap_or_default();
-    match crate::agent::ask_full(&node, &peer, &s("prompt").unwrap_or_default(), s("thread").as_deref(), s("title").as_deref(), &v["record"]).await {
+    let images = match crate::agent::clean_inputs(&v["images"]) {
+        Ok(x) => x,
+        Err(e) => return agent_err(e),
+    };
+    match crate::agent::ask_with(&node, &peer, &s("prompt").unwrap_or_default(), s("thread").as_deref(), s("title").as_deref(), &v["record"], &images).await {
         Ok(t) => ok_json(&thread_view(&node, &t, -1)),
         Err(e) => agent_err(e),
     }
@@ -2333,6 +2371,7 @@ async fn agent_delete(State(node): St, Query(m): Q) -> Response {
     }
     node.agent.threads.lock().remove(&id);
     let _ = std::fs::remove_file(node.data_dir.join("agent").join(format!("{}.json", id.replace(['/', '\\', ':'], "_"))));
+    let _ = std::fs::remove_file(node.data_dir.join("agent").join(format!("{}.codex.jsonl", crate::agent::safe(&id))));
     ok_json(&json!({ "ok": true }))
 }
 

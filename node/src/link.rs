@@ -769,6 +769,7 @@ pub async fn contact(node: &Arc<Node>, peer: &PeerConfig) -> Option<HelloRespons
                 s.remote = hello.you.clone();
                 s.channels = hello.channels.clone();
                 s.agent = hello.agent.clone();
+                s.agent_engine = hello.agent_engine.clone();
                 s.turn = hello.turn.clone();
                 s.relay = hello.relay.clone();
                 s.via = via.clone();

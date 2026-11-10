@@ -116,6 +116,9 @@ pub struct HelloResponse {
     /// (2.0) Агент этого узла для спрашивающего: «auto», «manual» или пусто (не принимает поручения от него).
     #[serde(skip_serializing_if = "String::is_empty")]
     pub agent: String,
+    /// (3.24) Движок агента этого узла для спрашивающего: «claude» | «codex»; пусто — старый мост (claude) или агент не принимает.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub agent_engine: String,
     /// (2.8) Ретранслятор голоса этого узла для спрашивающего: порт UDP и временный ключ.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn: Option<TurnInfo>,
@@ -206,6 +209,7 @@ impl Default for HelloResponse {
             revs: std::collections::BTreeMap::new(),
             channels: Vec::new(),
             agent: String::new(),
+            agent_engine: String::new(),
             turn: None,
             relay: None,
             assistant: None,

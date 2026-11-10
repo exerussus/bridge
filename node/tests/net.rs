@@ -924,6 +924,67 @@ async fn agent_exchange_folder_files_reach_orchestrator() {
     net.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_codex_runs_images_and_continues() {
+    let codex_home = std::env::temp_dir().join(format!("bridge-codex-home-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&codex_home).unwrap();
+    std::env::set_var("CODEX_HOME", &codex_home);
+    let mut net = agent_net("auto");
+    {
+        let st = net.configs.get_mut("stand").unwrap();
+        st.agent.engine = "codex".into();
+        st.agent.codex = env!("CARGO_BIN_EXE_fake-codex").into();
+    }
+    let dev = net.configs.get_mut("dev").unwrap();
+    let mut acc = indexmap::IndexMap::new();
+    acc.insert("stand".to_string(), "write".to_string());
+    dev.folders.push(SharedFolderConfig { id: "agent-obmen".into(), path: "обмен".into(), access: acc, ..Default::default() });
+    dev.agent.exchange = "agent-obmen".into();
+    net.start().await;
+    net.sync(1, &["dev", "stand"]).await;
+    assert_eq!(net.n("dev").peer_state("stand").agent_engine, "codex", "оркестратор видит движок соседа");
+    // входная картинка в обменной папке
+    std::fs::write(net.root.join("dev/обмен/pose.png"), b"\x89PNG").unwrap();
+    net.sync(1, &["stand"]).await;
+    let devn = net.n("dev").clone();
+    let t = bridge_node::agent::ask_with(&devn, "stand", "картинка: сохрани", None, None, &serde_json::Value::Null, &["pose.png".to_string()]).await.expect("поручено");
+    let t = agent_wait_status(&net, "dev", &t.id, &["idle", "failed"]).await;
+    assert_eq!(t.status, "idle", "{}", t.error);
+    assert_eq!(t.engine, "codex");
+    assert!(t.events.iter().any(|e| e.text.contains("картинок на входе: 1")), "входная картинка дошла через -i");
+    assert!(t.events.iter().any(|e| e.kind == "tool" && e.text == "Команда: Get-ChildItem"), "{:?}", t.events.iter().map(|e| &e.text).collect::<Vec<_>>());
+    let st = net.n("stand").agent.get(&t.id).unwrap();
+    assert_eq!(st.tokens.input, 1000);
+    assert_eq!(st.tokens.output, 55);
+    assert_eq!(st.images.len(), 1, "сохранённая Codex картинка — одна, дубль из generated_images не добавлен: {:?}", st.images);
+    assert_eq!(st.images[0].path, "saved.png");
+    assert_eq!((st.images[0].w, st.images[0].h), (3, 2));
+    let session = st.session.clone();
+    // продолжение: Codex «забыл» сохранить — мост кладёт сам
+    bridge_node::agent::ask(&devn, "stand", "картинка без сохранения", Some(&t.id), None).await.expect("продолжено");
+    let mut t2 = agent_wait_status(&net, "dev", &t.id, &["idle", "failed"]).await;
+    for _ in 0..40 {
+        if t2.images.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        t2 = devn.agent.get(&t.id).unwrap();
+    }
+    assert_eq!(net.n("stand").agent.get(&t.id).unwrap().session, session, "та же нить Codex");
+    assert!(t2.events.iter().any(|e| e.text.starts_with("Продолжаю: картинка без сохранения")));
+    assert_eq!(t2.images.len(), 2, "{:?}", t2.images);
+    let p = &t2.images[1].path;
+    assert!(p.starts_with(&format!("{}/codex-exec-", bridge_node::agent::safe(&t.id))), "{}", p);
+    assert!(net.root.join("stand/shared/dev/agent-obmen").join(p).is_file());
+    assert_eq!(t2.tokens.input, 2000, "токены дошли до оркестратора и копятся");
+    // ошибка хода
+    bridge_node::agent::ask(&devn, "stand", "ошибка", Some(&t.id), None).await.expect("поручено");
+    let t3 = agent_wait_status(&net, "dev", &t.id, &["failed"]).await;
+    assert!(t3.error.contains("не вышло"), "{}", t3.error);
+    net.stop().await;
+    let _ = std::fs::remove_dir_all(&codex_home);
+}
+
 // ───────────────────────── Телефон ─────────────────────────
 
 fn phone_http() -> reqwest::Client {

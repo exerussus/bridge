@@ -129,7 +129,7 @@ requests.post(B + "ui", json={"action": "join", "channel": "Семья"}, header
 
 Исполнители соседа, которые этому ПК можно запускать, — `peers[].runners` в `GET overview`: `[{name, title, share, params, hint, confirm}]`. `hint` — новое поле исполнителя в bridge.json: подсказка людям и ассистенту, какие значения допустимы.
 
-## Агенты (Claude поручает Claude)
+## Агенты (Claude поручает Claude или Codex)
 
 (3.3.1) Вопросы людям: `POST agent/request {thread, question, buttons?, input?}` → `{id, …}` (нить исполнителя в работе; статус — «ожидание»), `GET agent/request/wait?thread&id&timeout` → `{answered, req}`, `POST agent/answer {thread, req, answer}` (у заказчика уходит исполнителю; кнопочный вопрос принимает только кнопку; второй ответ — 409). В нити — `requests: [{id, q, buttons, input, at, answer, by, answered}]`, `open` — сколько без ответа. MCP: `agent_request {question, buttons?, input?, thread?, wait_seconds?}`; Claude, которого запускает мост, получает id нити в `BRIDGE_AGENT_THREAD` и инструменты моста (`--mcp-config`).
 
@@ -137,6 +137,8 @@ requests.post(B + "ui", json={"action": "join", "channel": "Семья"}, header
 
 - Статус нити: `queued` — ждёт, пока возьмут; `running` — в работе; `waiting` — в работе, но явно ждёт (сборка, ответ); `idle` — ход завершён, можно продолжить; `failed`; `stopped`. Пока исполнитель работает над новым поручением, ход прошлого (пришедший позже) статус и итог не меняет (`asks` — сколько поручений в нити).
 - `phase` и `phaseAt` — чем агент занят сейчас, он пишет это сам на смену этапа: в авто-режиме строкой «Этап: …» или «Ожидание: …» в своём сообщении (мост просит об этом в инструкции), в ручном — `agent/progress {phase, waiting}`. В ходе — событие `kind: "phase"`.
+- (3.24) **Движок исполнителя** — `agent.engine`: `claude` (по умолчанию) или `codex`. Настройки Codex в `POST agent/settings`: `codex` (путь), `codexSandbox` (`read-only` | `workspace-write` | `danger-full-access`), `codexNetwork`, `codexModel`, `codexDirs` (папки для записи). `GET agent`: `codex` — найденный путь, `local.engine`, `peers[].engine` (движок соседа из его привета, `agentEngine`; пусто — агент не принимает). `GET agent/codex-check` → `{found, path, version, login, error}`. Codex запускается как `codex exec --json --skip-git-repo-check -s … --add-dir <обменная> [-i <вход>]… -` (продолжение — `… resume <thread_id> -`), поручение — через stdin; сырой ход — `bridge-data/agent/<нить>.codex.jsonl`.
+- (3.24) `POST agent/ask {…, images?}` — входные картинки: пути относительно обменной папки (без `..`, не полные; до 16). Codex получает их флагами `-i`, Claude — списком путей в поручении. В нити: `engine`, `tokens {input, cached, output}` (Codex; `cost` у него 0), `images: [{path, size, w, h}]` — картинки хода (путь относительно обменной папки; полный — если файл вне её, только у исполнителя). Превью: `GET agent/image?id&n`. Картинки Codex мост собирает после хода: строки `IMAGE: <путь>` в его ответах и новые файлы в `.codex/generated_images/<thread_id>/`; несохранённые кладёт в `<обменная>/<нить>/codex-<имя>.png`.
 - `record: {share, id}` — поручение решает запись-задачу. Мост исполнителя сам ведёт её статус: в работе / ожидание → «принята» → «в работе», ход завершён → «на проверке» (итог — в пояснении), не получилось или остановлено — комментарий. «Готово» ставит только заказчик. Для этого исполнитель задачи (`assignee`) — ПК агента, и пространство есть у него. Панель пишет в задачу поля `agent` (ПК агента) и `agentThread` (нить).
 
 ## Чаты

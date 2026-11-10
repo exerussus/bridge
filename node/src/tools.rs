@@ -69,7 +69,7 @@ pub fn err_text(text: &str, code: u16) -> String {
     serde_json::from_str::<Value>(text).ok().and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from)).unwrap_or_else(|| format!("{} {}", code, text))
 }
 
-pub const INSTRUCTIONS: &str = "Мост связывает этот ПК с соседними ПК. Через него можно поручать задачи Claude на другом ПК или на этом же \
+pub const INSTRUCTIONS: &str = "Мост связывает этот ПК с соседними ПК. Через него можно поручать задачи Claude или Codex (смотря какой движок у исполнителя — bridge_peers) на другом ПК или на этом же \
 (agent_ask без peer — мост запустит отдельный Claude здесь; agent_ask → agent_wait), получать от него ход работы и итог, продолжать в той же нити (agent_ask с thread — он помнит контекст), \
 останавливать (agent_stop). Файлы — через обменную папку (exchange_folder): что кладёте туда, видно у соседа, и наоборот. \
 Если поручения приходят на этот ПК (ручной режим): agent_wait_task / agent_inbox → agent_take → работа → agent_progress → agent_report.";
@@ -77,15 +77,16 @@ pub const INSTRUCTIONS: &str = "Мост связывает этот ПК с с�
 pub fn tools() -> Value {
     let s = |props: Value, req: &[&str]| json!({ "type": "object", "properties": props, "required": req });
     json!([
-        { "name": "bridge_peers", "description": "Соседи моста: кто на связи и можно ли поручать их агенту (agent: auto — Claude запускается сам, manual — ждёт, пока возьмёт сессия Claude там).",
+        { "name": "bridge_peers", "description": "Соседи моста: кто на связи, можно ли поручать их агенту и каким движком он работает (auto — Claude или Codex запускается сам, manual — ждёт, пока возьмёт сессия Claude там).",
           "inputSchema": s(json!({}), &[]) },
-        { "name": "agent_ask", "description": "Поручить задачу Claude на соседнем ПК или на этом (peer не указан или «local» — мост запустит отдельный Claude на этом ПК в своей сессии) и дождаться итога (до wait_seconds). Несколько поручений идут параллельно (сколько разрешено в «Агентах»). Без thread — новая нить; с thread — продолжение той же сессии (исполнитель помнит контекст). Пиши поручение полностью: что сделать, где, какой итог и какие файлы положить в обменную папку.",
+        { "name": "agent_ask", "description": "Поручить задачу Claude на соседнем ПК или на этом (peer не указан или «local» — мост запустит отдельный Claude на этом ПК в своей сессии) и дождаться итога (до wait_seconds). Несколько поручений идут параллельно (сколько разрешено в «Агентах»). Без thread — новая нить; с thread — продолжение той же сессии (исполнитель помнит контекст). Пиши поручение полностью: что сделать, где, какой итог и какие файлы положить в обменную папку. Если исполнитель — Codex (bridge_peers): картинки он рисует встроенным генератором; укажи, куда сохранить (путь в обменной папке); размер и пропорции берутся из входной картинки-шаблона (images), отдельного параметра размера у генератора нет. Его самооценку картинок не принимай на веру — проверяй файлы сам.",
           "inputSchema": s(json!({ "peer": { "type": "string", "description": "имя соседа; пусто или «local» — этот ПК" }, "prompt": { "type": "string" }, "thread": { "type": "string", "description": "id нити для продолжения" },
                                    "title": { "type": "string" }, "wait_seconds": { "type": "integer", "description": "сколько ждать итога, по умолчанию 300; 0 — не ждать" },
-                                   "record": { "type": "object", "description": "запись-задача {share, id}: исполнитель сам поведёт её статус (в работе → на проверке)" } }), &["prompt"]) },
+                                   "record": { "type": "object", "description": "запись-задача {share, id}: исполнитель сам поведёт её статус (в работе → на проверке)" },
+                                   "images": { "type": "array", "items": { "type": "string" }, "description": "входные картинки: пути относительно обменной папки (сначала положи файлы туда); Codex получает их приложенными, Claude — списком путей" } }), &["prompt"]) },
         { "name": "agent_wait", "description": "Ждать итога по нити (до wait_seconds). Возвращает новый ход работы с прошлого вызова и итог, если он есть.",
           "inputSchema": s(json!({ "thread": { "type": "string" }, "wait_seconds": { "type": "integer" } }), &["thread"]) },
-        { "name": "agent_status", "description": "Нить целиком: статус, весь ход, итог, стоимость.", "inputSchema": s(json!({ "thread": { "type": "string" } }), &["thread"]) },
+        { "name": "agent_status", "description": "Нить целиком: статус, весь ход, итог, стоимость (у Codex — токены), картинки.", "inputSchema": s(json!({ "thread": { "type": "string" } }), &["thread"]) },
         { "name": "agent_stop", "description": "Остановить работу по нити (свою — попросит соседа; принятую — прервёт здесь).", "inputSchema": s(json!({ "thread": { "type": "string" } }), &["thread"]) },
         { "name": "agent_request", "description": "Спросить людей и дождаться ответа (исполнитель поручения): вопрос, кнопки-варианты и/или поле для свободного ответа. Вопрос видят заказчик и те, кто у этого ПК; первый ответ возвращается сюда. Используйте, когда ждёте действия человека (закончить сборку, проверить, выбрать вариант) — вместо ожидания вслепую.",
           "inputSchema": s(json!({ "question": { "type": "string" }, "buttons": { "type": "array", "items": { "type": "string" }, "description": "варианты ответа, до 8 (например «Готово», «Ещё 10 минут»)" }, "input": { "type": "boolean", "description": "поле для свободного ответа (без кнопок — всегда есть)" },
@@ -157,7 +158,7 @@ async fn render(api: &LocalApi, seen: &Seen, t: &Value, full: bool) -> String {
         let line = match s(e, "kind") {
             "prompt" => format!("[поручение] {}", text),
             "phase" => format!("[этап] {}", text),
-            "text" => format!("[Claude] {}", text),
+            "text" => format!("[{}] {}", if s(t, "engine") == "codex" { "Codex" } else { "Claude" }, text),
             "tool" => format!("  · {}", text),
             "result" => continue, // итог — ниже отдельно
             "error" => format!("[ошибка] {}", text),
@@ -178,6 +179,10 @@ async fn render(api: &LocalApi, seen: &Seen, t: &Value, full: bool) -> String {
     if let Some(c) = t.get("cost").and_then(|c| c.as_f64()).filter(|c| *c > 0.0) {
         out.push_str(&format!(" · ${:.2}", c));
     }
+    let tok = |k: &str| t.pointer(&format!("/tokens/{}", k)).and_then(|x| x.as_i64()).unwrap_or(0);
+    if tok("input") + tok("output") > 0 {
+        out.push_str(&format!(" · токены: вход {} (из кэша {}), выход {}", tok("input"), tok("cached"), tok("output")));
+    }
     if (st == "running" || st == "waiting") && !s(t, "phase").is_empty() {
         out.push_str(&format!(" · сейчас: {}", s(t, "phase")));
     }
@@ -197,6 +202,19 @@ async fn render(api: &LocalApi, seen: &Seen, t: &Value, full: bool) -> String {
     if let Some(p) = t.get("exchangePath").and_then(|p| p.as_str()) {
         out.push_str(&format!("\n\nОбменная папка на этом ПК: {}", p));
     }
+    let imgs = t.get("images").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+    if !imgs.is_empty() {
+        let base = t.get("exchangePath").and_then(|p| p.as_str()).map(std::path::PathBuf::from);
+        out.push_str("\n\nКартинки нити (файлы могут ещё досинхронизироваться):");
+        for im in &imgs {
+            let p = s(im, "path");
+            let full = match &base {
+                Some(b) if !std::path::Path::new(p).is_absolute() => b.join(p).display().to_string(),
+                _ => format!("{} (только на исполнителе)", p),
+            };
+            out.push_str(&format!("\n  {} · {}×{}", full, im.get("w").and_then(|x| x.as_u64()).unwrap_or(0), im.get("h").and_then(|x| x.as_u64()).unwrap_or(0)));
+        }
+    }
     match st {
         "running" | "queued" => out.push_str(&format!("\n\nЕщё не готово. Ждать дальше: agent_wait(thread=\"{}\").", id)),
         "idle" => out.push_str(&format!("\n\nПродолжить в той же сессии: agent_ask(peer=\"{}\", thread=\"{}\", prompt=…).", if local { "local" } else { s(t, "peer") }, id)),
@@ -211,8 +229,10 @@ pub async fn call(api: &LocalApi, seen: &Seen, name: &str, a: &Value) -> Result<
             let v = get_json(api, "agent").await?;
             let peers = v.get("peers").and_then(|p| p.as_array()).cloned().unwrap_or_default();
             let lm = v["local"]["mode"].as_str().unwrap_or("off");
+            let le = if v["local"]["engine"].as_str() == Some("codex") { "Codex" } else { "Claude" };
+            let auto_l = format!("{} запустится сам", le);
             let head = format!("Этот ПК ({}) — agent_ask без peer: {}", v["local"]["name"].as_str().unwrap_or(""), match lm {
-                "auto" => "Claude запустится сам",
+                "auto" => auto_l.as_str(),
                 "manual" => "поручение ждёт сессию Claude на этом ПК (agent_inbox → agent_take)",
                 _ => "агент выключен (панель → «Агенты» → режим)",
             });
@@ -223,6 +243,7 @@ pub async fn call(api: &LocalApi, seen: &Seen, name: &str, a: &Value) -> Result<
                 .iter()
                 .map(|p| {
                     let ag = match s(p, "agent") {
+                        "auto" if s(p, "engine") == "codex" => "агент: сам запускает Codex",
                         "auto" => "агент: сам запускает Claude",
                         "manual" => "агент: ждёт, пока возьмёт сессия Claude там",
                         _ => "агент: не принимает поручения от этого ПК",
@@ -241,6 +262,9 @@ pub async fn call(api: &LocalApi, seen: &Seen, name: &str, a: &Value) -> Result<
             }
             if a.get("record").map(|r| r.is_object()).unwrap_or(false) {
                 body["record"] = a["record"].clone();
+            }
+            if a.get("images").map(|r| r.is_array()).unwrap_or(false) {
+                body["images"] = a["images"].clone();
             }
             let t = post_json(api, "agent/ask", Some(body)).await?;
             let id = s(&t, "id").to_string();

@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-app"
-version = "3.23.0"
+version = "3.24.0"
 dependencies = [
  "axum",
  "bridge-core",
@@ -400,7 +400,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-core"
-version = "3.23.0"
+version = "3.24.0"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
@@ -421,7 +421,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-node"
-version = "3.23.0"
+version = "3.24.0"
 dependencies = [
  "argon2",
  "axum",
@@ -463,7 +463,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-turn"
-version = "3.23.0"
+version = "3.24.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2551,7 +2551,7 @@ dependencies = [
 
 [[package]]
 name = "most-mobile"
-version = "3.23.0"
+version = "3.24.0"
 dependencies = [
  "bridge-core",
  "bridge-node",
@@ -2564,7 +2564,7 @@ dependencies = [
 
 [[package]]
 name = "most-net"
-version = "3.23.0"
+version = "3.24.0"
 dependencies = [
  "axum",
  "bridge-core",
@@ -2585,7 +2585,7 @@ dependencies = [
 
 [[package]]
 name = "most-relay"
-version = "3.23.0"
+version = "3.24.0"
 dependencies = [
  "axum",
  "base64 0.22.1",

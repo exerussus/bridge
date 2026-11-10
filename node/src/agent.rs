@@ -6,6 +6,10 @@
 //!
 //! Режимы исполнителя: auto — мост сам запускает Claude Code (`claude -p … --output-format stream-json`, `--resume` для продолжения);
 //! manual — поручение ждёт, пока его возьмёт сессия Claude на этом ПК (инструменты моста: agent_inbox / agent_take / agent_report).
+//! (3.24) Движок исполнителя: Claude Code или Codex (`agent.engine`), Codex — в `agent/codex.rs`.
+
+mod codex;
+pub use codex::{codex_check, find_codex};
 
 use crate::node::Node;
 use bridge_core::time::{self, Time};
@@ -86,7 +90,32 @@ pub struct Thread {
     pub requests: Vec<Req>,
     /// (3.3) Поручение себе: Claude запускается на этом же ПК, соседа нет (роль in, peer — этот ПК).
     pub local: bool,
+    /// (3.24) Движок исполнителя нити: claude | codex (пусто — claude, нить старого моста).
+    pub engine: String,
+    /// (3.24) Токены за все ходы (Codex не сообщает стоимость).
+    pub tokens: Tokens,
+    /// (3.24) Картинки нити по порядку появления: путь относительно обменной папки (или полный — только у исполнителя).
+    pub images: Vec<ImageOut>,
+    /// (3.24) Входные картинки последнего поручения: пути относительно обменной папки.
+    pub inputs: Vec<String>,
     pub events: Vec<Ev>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Tokens {
+    pub input: i64,
+    pub cached: i64,
+    pub output: i64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ImageOut {
+    pub path: String,
+    pub size: u64,
+    pub w: u32,
+    pub h: u32,
 }
 
 impl Thread {
@@ -125,12 +154,22 @@ impl Thread {
         }
     }
 
+    /// Движок нити: «codex» или «claude».
+    pub fn engine_name(&self) -> &'static str {
+        if self.engine.eq_ignore_ascii_case("codex") {
+            "codex"
+        } else {
+            "claude"
+        }
+    }
+
     /// Кратко — для списков.
     pub fn summary(&self) -> Value {
         let last = self.events.iter().rev().find(|e| e.kind == "text" || e.kind == "result" || e.kind == "error").map(|e| e.text.chars().take(200).collect::<String>()).unwrap_or_default();
         json!({ "id": self.id, "role": self.role, "peer": self.peer, "title": self.title, "status": self.status, "created": self.created.map(|t| time::format(&t)),
                 "updated": self.updated.map(|t| time::format(&t)), "cost": self.cost, "turns": self.turns, "error": self.error, "last": last, "events": self.events.len(), "taken": self.taken,
                 "phase": self.phase, "phaseAt": self.phase_at.map(|t| time::format(&t)), "asks": self.asks, "record": self.record, "local": self.local,
+                "engine": self.engine_name(), "tokens": self.tokens, "images": self.images,
                 "requests": self.requests.iter().rev().take(20).rev().collect::<Vec<_>>(), "open": self.requests.iter().filter(|r| r.answered.is_none()).count() })
     }
 
@@ -233,7 +272,7 @@ impl Agent {
     }
 }
 
-fn safe(s: &str) -> String {
+pub fn safe(s: &str) -> String {
     s.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' }).collect()
 }
 
@@ -251,13 +290,40 @@ pub async fn ask(node: &Arc<Node>, peer: &str, prompt: &str, thread: Option<&str
 /// Поручение с привязкой к записи-задаче `record` ({share, id}): исполнитель сам ведёт её статус
 /// (принята → в работе → на проверке); «готово» ставит только заказчик.
 pub async fn ask_full(node: &Arc<Node>, peer: &str, prompt: &str, thread: Option<&str>, title: Option<&str>, record: &Value) -> Result<Thread, (u16, String)> {
+    ask_with(node, peer, prompt, thread, title, record, &[]).await
+}
+
+/// (3.24) Входные картинки поручения: пути относительно обменной папки, без «..» и без абсолютных.
+pub fn clean_inputs(v: &Value) -> Result<Vec<String>, (u16, String)> {
+    let mut out = Vec::new();
+    for x in v.as_array().cloned().unwrap_or_default() {
+        let Some(p) = x.as_str() else { continue };
+        let p = p.trim().replace('\\', "/");
+        if p.is_empty() {
+            continue;
+        }
+        let bad = p.starts_with('/') || p.contains(':') || p.split('/').any(|c| c == "..");
+        if bad {
+            return Err((400, format!("картинка «{}»: нужен путь внутри обменной папки (без «..», не полный)", p)));
+        }
+        out.push(p.trim_start_matches("./").to_string());
+    }
+    if out.len() > 16 {
+        return Err((400, "не больше 16 входных картинок".into()));
+    }
+    Ok(out)
+}
+
+/// Поручение с входными картинками `images` (пути относительно обменной папки).
+pub async fn ask_with(node: &Arc<Node>, peer: &str, prompt: &str, thread: Option<&str>, title: Option<&str>, record: &Value, images: &[String]) -> Result<Thread, (u16, String)> {
+    let images = clean_inputs(&json!(images))?;
     let record = clean_record(record);
     let prompt = prompt.trim();
     if prompt.is_empty() {
         return Err((400, "пустое поручение".into()));
     }
     if is_local(node, peer) {
-        return ask_local(node, prompt, thread, title, &record);
+        return ask_local(node, prompt, thread, title, &record, &images);
     }
     let pc = node.cfg.read().peer(peer).cloned().ok_or((404, format!("нет соседа «{}»", peer)))?;
     if !pc.has_url() {
@@ -299,6 +365,10 @@ pub async fn ask_full(node: &Arc<Node>, peer: &str, prompt: &str, thread: Option
             exchange_id: ex_id.clone(),
             ..Default::default()
         });
+        let eng = node.peer_state(&pc.name).agent_engine;
+        if !eng.is_empty() {
+            t.engine = eng;
+        }
         t.status = "queued".into();
         t.error.clear();
         t.phase.clear();
@@ -311,7 +381,7 @@ pub async fn ask_full(node: &Arc<Node>, peer: &str, prompt: &str, thread: Option
     let snapshot = node.agent.get(&id).unwrap();
     node.agent.save(&snapshot);
     let client = node.client_for(&pc);
-    let body = json!({ "thread": id, "title": title, "prompt": prompt, "exchangeOwner": ex_owner, "exchangeId": ex_id, "ask": snapshot.asks, "record": snapshot.record });
+    let body = json!({ "thread": id, "title": title, "prompt": prompt, "exchangeOwner": ex_owner, "exchangeId": ex_id, "ask": snapshot.asks, "record": snapshot.record, "images": images });
     match tokio::time::timeout(Duration::from_secs(20), client.post_json("/peer/agent/ask", &body)).await {
         Ok(Ok((code, text))) if (200..300).contains(&code) => {
             let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
@@ -348,7 +418,7 @@ pub fn is_local(node: &Node, peer: &str) -> bool {
 
 /// (3.3) Поручить Claude на этом ПК: нить in без соседа. Режим агента тот же (auto — мост запускает Claude сам,
 /// manual — ждёт сессию Claude здесь); «кто может поручать» не нужен — поручает сам хозяин ПК.
-fn ask_local(node: &Arc<Node>, prompt: &str, thread: Option<&str>, title: Option<&str>, record: &Value) -> Result<Thread, (u16, String)> {
+fn ask_local(node: &Arc<Node>, prompt: &str, thread: Option<&str>, title: Option<&str>, record: &Value, images: &[String]) -> Result<Thread, (u16, String)> {
     let me = node.node_name();
     if node.cfg.read().agent.mode == "off" {
         return Err((403, "агент на этом ПК выключен (панель → «Агенты» → режим)".into()));
@@ -372,7 +442,7 @@ fn ask_local(node: &Arc<Node>, prompt: &str, thread: Option<&str>, title: Option
         if !ex.is_empty() && c.folder(&ex).is_some() { (c.node.clone(), ex) } else { (String::new(), String::new()) }
     };
     let title = title.map(|s| s.to_string()).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| prompt.lines().next().unwrap_or("").chars().take(80).collect());
-    let v = json!({ "thread": id, "title": title, "prompt": prompt, "exchangeOwner": ex_owner, "exchangeId": ex_id, "record": record });
+    let v = json!({ "thread": id, "title": title, "prompt": prompt, "exchangeOwner": ex_owner, "exchangeId": ex_id, "record": record, "images": images });
     enqueue(node, &me, &v, true)?;
     Ok(node.agent.get(&id).unwrap())
 }
@@ -458,6 +528,17 @@ pub fn on_events(node: &Arc<Node>, from: &str, v: &Value) -> Result<(), (u16, St
         if let Some(c) = v.get("turns").and_then(|c| c.as_i64()) {
             t.turns = c;
         }
+        if let Some(e) = v.get("engine").and_then(|s| s.as_str()).filter(|s| !s.is_empty()) {
+            t.engine = e.to_string();
+        }
+        if let Some(x) = v.get("tokens").and_then(|x| serde_json::from_value::<Tokens>(x.clone()).ok()) {
+            t.tokens = x;
+        }
+        if !stale {
+            if let Some(x) = v.get("images").and_then(|x| serde_json::from_value::<Vec<ImageOut>>(x.clone()).ok()) {
+                t.images = x;
+            }
+        }
     });
     if status != prev_status && !status.is_empty() {
         let title = node.agent.get(&id).map(|t| t.title).unwrap_or_default();
@@ -497,12 +578,17 @@ fn enqueue(node: &Arc<Node>, from: &str, v: &Value, local: bool) -> Result<Value
     if prompt.trim().is_empty() {
         return Err((400, "пустое поручение".into()));
     }
+    let inputs = clean_inputs(&v["images"])?;
+    let engine = node.cfg.read().agent.engine();
     if let Some(t) = node.agent.get(&id) {
         if t.role != "in" || !eq_ic(&t.peer, from) || t.local != local {
             return Err((409, "такая нить уже есть у другого".into()));
         }
         if t.busy() {
             return Err((409, "агент ещё работает над этой нитью".into()));
+        }
+        if t.engine_name() != engine && !t.session.is_empty() {
+            return Err((409, format!("нить начата движком {}, сейчас у исполнителя {} — начните новую нить", engine_title(t.engine_name()), engine_title(engine))));
         }
     }
     let auto = mode == "auto";
@@ -522,6 +608,8 @@ fn enqueue(node: &Arc<Node>, from: &str, v: &Value, local: bool) -> Result<Value
             local,
             ..Default::default()
         });
+        t.engine = engine.to_string();
+        t.inputs = inputs.clone();
         t.status = "queued".into();
         t.taken = false;
         t.error.clear();
@@ -570,8 +658,13 @@ pub fn schedule(node: &Arc<Node>) {
         node.agent.procs.lock().insert(id.clone(), Proc { pid: None, cancel: cancel.clone() });
         node.agent.update(&id, |t| t.status = "running".into());
         let n2 = node.clone();
+        let is_codex = node.agent.get(&id).map(|t| t.engine_name() == "codex").unwrap_or(false);
         tokio::spawn(async move {
-            run_claude(&n2, &id, cancel).await;
+            if is_codex {
+                codex::run_codex(&n2, &id, cancel).await;
+            } else {
+                run_claude(&n2, &id, cancel).await;
+            }
             n2.agent.procs.lock().remove(&id);
             schedule(&n2);
         });
@@ -657,11 +750,13 @@ pub fn exchange_path(node: &Node, t: &Thread) -> Option<PathBuf> {
 /// Что Claude-исполнитель должен знать о своём положении.
 pub fn context_prompt(node: &Node, t: &Thread) -> String {
     let ex = exchange_path(node, t);
+    let who = engine_title(t.engine_name());
     if t.local {
         let mut s = format!(
-            "Ты — Claude-исполнитель на ПК «{me}». Поручение поставил хозяин этого ПК (или его Claude) через «Мост». \
+            "Ты — {who}-исполнитель на ПК «{me}». Поручение поставил хозяин этого ПК (или его Claude) через «Мост». \
              Человека рядом может не быть: не задавай вопросов и не жди подтверждений — делай, а если чего-то не хватает, так и напиши в отчёте.\n\
              Рабочая папка: {wd}.\n",
+            who = who,
             me = node.node_name(),
             wd = work_dir(node).display()
         );
@@ -671,9 +766,10 @@ pub fn context_prompt(node: &Node, t: &Thread) -> String {
         return finish_prompt(s, t);
     }
     let mut s = format!(
-        "Ты — Claude-исполнитель на ПК «{me}». Поручения приходят от Claude-оркестратора на ПК «{from}» через «Мост» (связь между ПК). \
+        "Ты — {who}-исполнитель на ПК «{me}». Поручения приходят от Claude-оркестратора на ПК «{from}» через «Мост» (связь между ПК). \
          Человека рядом нет: не задавай вопросов и не жди подтверждений — делай, а если чего-то не хватает, так и напиши в отчёте.\n\
          Рабочая папка: {wd}.\n",
+        who = who,
         me = node.node_name(),
         from = t.peer,
         wd = work_dir(node).display()
@@ -703,8 +799,15 @@ fn mcp_config(node: &Node) -> Option<String> {
 fn finish_prompt(mut s: String, t: &Thread) -> String {
     s.push_str("Отмечай этапы работы — не на каждое действие, а когда переходишь к новой части: отдельной строкой в начале сообщения «Этап: <коротко, что делаешь>», например «Этап: ищу информацию», «Этап: сверяю данные». \
                 Если ждёшь (долгая сборка, ответ сервиса, процесс в фоне) — строкой «Ожидание: <чего ждёшь>». Это видно в мосте как твой статус.\n\
-                Если нужно решение или действие человека (дождаться, пока он закончит, выбрать вариант, подтвердить) — не жди вслепую: вызови инструмент моста agent_request(question, buttons, input) — \
-                люди увидят вопрос с кнопками и полем ответа, а ответ вернётся тебе. Пока ждёшь ответа, не гадай.\n");
+                ");
+    if t.engine_name() == "codex" {
+        s.push_str("Картинки рисуй только встроенным инструментом генерации изображений — не через API и не скриптом. Каждую готовую картинку сохрани по пути из поручения \
+                    (если путь не указан — в обменную папку, подпапка с id нити). В конце хода перечисли каждую сохранённую картинку отдельной строкой «IMAGE: <полный путь>». \
+                    Писать можно только в рабочую и обменную папку (и в папки, перечисленные в поручении, если они разрешены).\n");
+    } else {
+        s.push_str("Если нужно решение или действие человека (дождаться, пока он закончит, выбрать вариант, подтвердить) — не жди вслепую: вызови инструмент моста agent_request(question, buttons, input) — \
+                    люди увидят вопрос с кнопками и полем ответа, а ответ вернётся тебе. Пока ждёшь ответа, не гадай.\n");
+    }
     if t.record.is_object() {
         s.push_str(&format!("Поручение — запись-задача {} в пространстве «{}»: её статус мост ведёт сам (в работе → на проверке), «выполнено» ставит заказчик.\n", t.record["id"].as_str().unwrap_or(""), t.record["share"].as_str().unwrap_or("")));
     }
@@ -714,7 +817,15 @@ fn finish_prompt(mut s: String, t: &Thread) -> String {
 
 async fn run_claude(node: &Arc<Node>, id: &str, cancel: tokio_util::sync::CancellationToken) {
     let Some(t) = node.agent.get(id) else { return };
-    let prompt = t.events.iter().rev().find(|e| e.kind == "prompt").map(|e| e.text.clone()).unwrap_or_default();
+    let mut prompt = t.events.iter().rev().find(|e| e.kind == "prompt").map(|e| e.text.clone()).unwrap_or_default();
+    match input_paths(node, &t).await {
+        Ok(list) if !list.is_empty() => prompt.push_str(&format!("\n\nВходные картинки:\n{}", list.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n"))),
+        Ok(_) => {}
+        Err(why) => {
+            fail(node, id, &why);
+            return;
+        }
+    }
     let Some(exe) = find_claude(node) else {
         fail(node, id, "не найден Claude Code (claude.exe). Установите: PowerShell → irm https://claude.ai/install.ps1 | iex, затем один раз запустите claude и войдите. Или укажите путь в «Агенты» → «Путь к claude».");
         return;
@@ -1177,7 +1288,8 @@ pub async fn pusher(node: Arc<Node>) {
             if !pc.has_url() {
                 continue;
             }
-            let body = json!({ "thread": t.id, "title": t.title, "status": t.status, "session": t.session, "result": t.result, "error": t.error, "cost": t.cost, "turns": t.turns, "events": evs, "asks": t.asks, "phase": t.phase, "requests": t.requests });
+            let body = json!({ "thread": t.id, "title": t.title, "status": t.status, "session": t.session, "result": t.result, "error": t.error, "cost": t.cost, "turns": t.turns, "events": evs, "asks": t.asks, "phase": t.phase, "requests": t.requests,
+                              "engine": t.engine_name(), "tokens": t.tokens, "images": t.images });
             let client = node.client_for(&pc);
             match tokio::time::timeout(Duration::from_secs(15), client.post_json("/peer/agent/events", &body)).await {
                 Ok(Ok((code, _))) if (200..300).contains(&code) => {
@@ -1342,3 +1454,31 @@ pub fn record_follow(node: &Arc<Node>, t: &Thread) {
 }
 
 static RECORD_SEEN: std::sync::LazyLock<Mutex<HashMap<String, String>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// «Claude» / «Codex» — для текстов.
+pub fn engine_title(engine: &str) -> &'static str {
+    if engine.eq_ignore_ascii_case("codex") {
+        "Codex"
+    } else {
+        "Claude"
+    }
+}
+
+/// (3.24) Входные картинки нити — полные пути на этом ПК. Файл может ещё досинхронизироваться: ждём до 30 с.
+async fn input_paths(node: &Arc<Node>, t: &Thread) -> Result<Vec<PathBuf>, String> {
+    if t.inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(ex) = exchange_path(node, t) else {
+        return Err("поручение с входными картинками, но у нити нет обменной папки (у заказчика: «Агенты» → обменная папка)".into());
+    };
+    let list: Vec<PathBuf> = t.inputs.iter().map(|p| ex.join(p.replace('/', std::path::MAIN_SEPARATOR_STR))).collect();
+    for _ in 0..30 {
+        if list.iter().all(|p| p.is_file()) {
+            return Ok(list);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let missing: Vec<String> = list.iter().filter(|p| !p.is_file()).map(|p| p.display().to_string()).collect();
+    Err(format!("нет входной картинки в обменной папке: {}", missing.join(", ")))
+}

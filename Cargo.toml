@@ -3,7 +3,7 @@ resolver = "2"
 members = ["core", "turn", "node", "relay", "net", "app", "mobile"]
 
 [workspace.package]
-version = "3.23.0"
+version = "3.24.0"
 edition = "2021"
 license = "UNLICENSED"
 

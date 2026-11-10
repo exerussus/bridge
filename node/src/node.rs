@@ -52,6 +52,8 @@ pub struct PeerState {
     pub bytes_in: i64,
     /// Агент соседа для нас: auto, manual или пусто.
     pub agent: String,
+    /// (3.24) Движок агента соседа: claude | codex (пусто — claude, старый мост).
+    pub agent_engine: String,
     /// Каналы соседа, куда можно зайти (из его привета).
     #[serde(skip)]
     pub channels: Vec<bridge_core::proto::ChannelInfo>,

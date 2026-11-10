@@ -465,12 +465,12 @@ async fn hello(State(node): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, Quer
     }
     let ps = node.peer_state(&pc.name);
     let channels = crate::media::channels_for(&node, &pc.name);
-    let agent = {
+    let (agent, agent_engine) = {
         let c = node.cfg.read();
         if c.agent_allows(&pc.name) {
-            c.agent.mode.clone()
+            (c.agent.mode.clone(), c.agent.engine().to_string())
         } else {
-            String::new()
+            (String::new(), String::new())
         }
     };
     let turn = node.turn.running().then(|| {
@@ -504,6 +504,7 @@ async fn hello(State(node): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, Quer
         relay,
         channels,
         agent,
+        agent_engine,
         node: node.node_name(),
         shares,
         status: Some(node.status()),
