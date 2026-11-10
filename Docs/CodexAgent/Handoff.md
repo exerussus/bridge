@@ -12,7 +12,7 @@
 | Исполнитель Codex: поиск, запуск, разбор `--json`, картинки, проверка | `node/src/agent/codex.rs` (новый модуль) |
 | `GET agent/codex-check`, `GET agent/image?id&n`, `engine` в `GET agent` | `node/src/http_local.rs` |
 | Инструменты MCP/efc: движок в `bridge_peers`, `images` в `agent_ask`, токены и картинки в `agent_wait`/`agent_status` | `node/src/tools.rs` |
-| Панель: выбор движка, настройки Codex, «Проверить Codex», подписи «Кому», токены, превью и лента картинок | `ui/src/tabs/Agent.svelte`, `ui/src/lib/state.svelte.ts`, `ui/src/tabs/Help.svelte` |
+| Панель: режим «сам запускает Codex» (рядом с «сам запускает Claude»), настройки Codex, «Проверить Codex», подписи «Кому», токены, превью и лента картинок | `ui/src/tabs/Agent.svelte`, `ui/src/lib/state.svelte.ts`, `ui/src/tabs/Help.svelte` |
 | Тесты: подставной Codex, интеграционный тест | `node/tests/fixtures/fake_codex.rs`, `node/Cargo.toml`, `node/tests/net.rs` (`agent_codex_runs_images_and_continues`) |
 | Версия, журнал, API | `Cargo.toml`, `ui/package.json`, `CHANGELOG.md`, `API.md` |
 

@@ -18,7 +18,7 @@
   let after = -1;
   let more = $state('');
   let dirty = false;
-  let cfg = $state<any>({ mode: 'off', allowFrom: [], workDir: '', claude: '', permissionMode: 'auto', maxMinutes: 60, maxParallel: 3, maxBudgetUsd: '', engine: 'claude', codex: '', codexSandbox: 'workspace-write', codexNetwork: false, codexModel: '', codexDirs: '' });
+  let cfg = $state<any>({ pick: 'off', mode: 'off', allowFrom: [], workDir: '', claude: '', permissionMode: 'auto', maxMinutes: 60, maxParallel: 3, maxBudgetUsd: '', engine: 'claude', codex: '', codexSandbox: 'workspace-write', codexNetwork: false, codexModel: '', codexDirs: '' });
   let check = $state<any>(null);
   let log = $state<HTMLElement>();
   let timer: any = null;
@@ -33,6 +33,7 @@
     if (!dirty) {
       const st = AG.settings;
       cfg = { mode: st.mode, allowFrom: [...st.allowFrom], workDir: st.workDir, claude: st.claude, permissionMode: st.permissionMode || 'auto', maxMinutes: st.maxMinutes, maxParallel: st.maxParallel, maxBudgetUsd: st.maxBudgetUsd > 0 ? st.maxBudgetUsd : '',
+        pick: st.mode === 'auto' ? (st.engine === 'codex' ? 'codex' : 'auto') : st.mode,
         engine: st.engine === 'codex' ? 'codex' : 'claude', codex: st.codex || '', codexSandbox: st.codexSandbox || 'workspace-write', codexNetwork: !!st.codexNetwork, codexModel: st.codexModel || '', codexDirs: (st.codexDirs || []).join('\n') };
     }
     if (cur) show(cur, true);
@@ -77,10 +78,13 @@
   async function del() { if (!confirm('Убрать нить из списка на этом ПК?')) return; await api('POST', 'agent/delete?id=' + encodeURIComponent(cur!)); cur = null; th = null; refresh(); }
   async function cont() { const p = more.trim(); if (!p) return; try { await api('POST', 'agent/ask', { peer: th.local ? '' : th.peer, prompt: p, thread: cur }); more = ''; refresh(); } catch (e: any) { toast(e.message, 'bad'); } }
   async function save() {
-    const engine = cfg.mode === 'manual' ? 'claude' : cfg.engine;
+    // режим и движок выбираются одним переключателем: выключен / сам запускает Claude / сам запускает Codex / ждёт сессию Claude
+    cfg.mode = cfg.pick === 'codex' ? 'auto' : cfg.pick;
+    const engine = cfg.pick === 'codex' ? 'codex' : 'claude';
+    cfg.engine = engine;
     const body = { mode: cfg.mode, allowFrom: cfg.allowFrom, workDir: String(cfg.workDir).trim(), claude: String(cfg.claude).trim(), permissionMode: cfg.permissionMode, maxMinutes: +cfg.maxMinutes || 60, maxParallel: +cfg.maxParallel || 3, maxBudgetUsd: +String(cfg.maxBudgetUsd).replace(',', '.') || 0,
       engine, codex: String(cfg.codex).trim(), codexSandbox: cfg.codexSandbox, codexNetwork: !!cfg.codexNetwork, codexModel: String(cfg.codexModel).trim(), codexDirs: String(cfg.codexDirs).split('\n').map((x: string) => x.trim()).filter(Boolean) };
-    try { await api('POST', 'agent/settings', body); dirty = false; toast('Сохранено', 'ok'); (document.activeElement as HTMLElement)?.blur(); refresh(); if (engine === 'codex' && cfg.mode === 'auto') codexCheck(); } catch (e: any) { toast(e.message, 'bad'); }
+    try { await api('POST', 'agent/settings', body); dirty = false; toast('Сохранено', 'ok'); (document.activeElement as HTMLElement)?.blur(); refresh(); if (engine === 'codex') codexCheck(); } catch (e: any) { toast(e.message, 'bad'); }
   }
   async function exchange(p: string) { try { await api('POST', 'agent/exchange?peer=' + encodeURIComponent(p)); toast('Обменная папка открыта для ' + titleOf(p), 'ok'); refresh(); } catch (e: any) { toast(e.message, 'bad'); } }
   // канал для агента без сети (VM): файловый канал efc/1 с теми же инструментами, что bridge mcp
@@ -166,23 +170,18 @@
       <div class="grid" style="margin-top:14px" onchange={() => (dirty = true)} oninput={() => (dirty = true)} role="group">
         <div class="card"><h3>Этот ПК — исполнитель</h3>
           <div class="row" style="margin-bottom:10px">
-            <label class="chip"><input type="radio" value="off" bind:group={cfg.mode} /> выключен</label>
-            <label class="chip"><input type="radio" value="auto" bind:group={cfg.mode} /> сам запускает {eng(cfg.engine)}</label>
-            <label class="chip"><input type="radio" value="manual" bind:group={cfg.mode} /> ждёт сессию Claude</label>
+            <label class="chip"><input type="radio" value="off" bind:group={cfg.pick} /> выключен</label>
+            <label class="chip"><input type="radio" value="auto" bind:group={cfg.pick} /> сам запускает Claude</label>
+            <label class="chip"><input type="radio" value="codex" bind:group={cfg.pick} /> сам запускает Codex</label>
+            <label class="chip"><input type="radio" value="manual" bind:group={cfg.pick} /> ждёт сессию Claude</label>
           </div>
           <div class="f">Кто может поручать<div class="row">
             <label class="chip"><input type="checkbox" value="*" bind:group={cfg.allowFrom} /> все соседи</label>
             {#each Object.entries(ui.ov.groups || {}) as [g, v]}<label class="chip"><input type="checkbox" value={'@' + g} bind:group={cfg.allowFrom} /> 👥 {(v as any).title || g}</label>{/each}
             {#each AG.peers as p (p.name)}<label class="chip"><input type="checkbox" value={p.name} bind:group={cfg.allowFrom} /> {p.title || p.name}</label>{/each}
           </div></div>
-          <div class="row" style="margin-bottom:10px" class:hide={cfg.mode !== 'auto'}>
-            <span class="small muted">Движок:</span>
-            <label class="chip"><input type="radio" value="claude" bind:group={cfg.engine} /> Claude Code</label>
-            <label class="chip"><input type="radio" value="codex" bind:group={cfg.engine} /> Codex</label>
-          </div>
-          {#if cfg.mode === 'manual'}<div class="small muted" style="margin:-4px 0 10px">В ручном режиме поручения берёт сессия Claude; Codex — только в режиме «сам запускает».</div>{/if}
-          <label class="f">Рабочая папка {cfg.mode === 'auto' ? eng(cfg.engine) : 'Claude'}<input bind:value={cfg.workDir} placeholder="пусто — папка «agent» рядом с мостом" /></label>
-          <div class:hide={cfg.mode !== 'auto' || cfg.engine !== 'codex'}>
+          <label class="f">Рабочая папка {cfg.pick === 'codex' ? 'Codex' : 'Claude'}<input bind:value={cfg.workDir} placeholder="пусто — папка «agent» рядом с мостом" /></label>
+          <div class:hide={cfg.pick !== 'codex'}>
             <label class="f">Codex (codex.exe)<input bind:value={cfg.codex} placeholder="пусто — найти самому" /></label>
             <div class="small" style="margin:-4px 0 10px">{#if AG.codex}<span style="color:var(--ok)">найден: {AG.codex}</span>{:else}<span style="color:var(--warn)">Codex не найден. Установите: PowerShell → <code>irm https://chatgpt.com/codex/install.ps1 | iex</code> (или <code>npm i -g @openai/codex</code>), затем один раз <code>codex login</code>.</span>{/if}</div>
             <div class="row" style="gap:12px;align-items:flex-end">
@@ -198,7 +197,7 @@
               {:else if check && check.found && !check.error}<span class="small" style="color:var(--ok)">{check.version} · {check.login}</span>
               {:else if check}<span class="small" style="color:var(--bad)">{check.error}</span>{/if}</div>
           </div>
-          <div class:hide={cfg.mode !== 'auto' || cfg.engine === 'codex'}>
+          <div class:hide={cfg.pick !== 'auto'}>
             <label class="f">Claude Code (claude.exe)<input bind:value={cfg.claude} placeholder="пусто — найти самому" /></label>
             <div class="small" style="margin:-4px 0 10px">{#if AG.claude}<span style="color:var(--ok)">найден: {AG.claude}</span>{:else}<span style="color:var(--warn)">Claude Code не найден. Установите: PowerShell → <code>irm https://claude.ai/install.ps1 | iex</code>, затем один раз запустите <code>claude</code> и войдите тем же аккаунтом.</span>{/if}</div>
             <div class="row" style="gap:12px;align-items:flex-end">
